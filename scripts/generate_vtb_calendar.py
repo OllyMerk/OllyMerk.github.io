@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,6 @@ import requests
 BASE_URL = os.getenv("RBF_BASE_URL", "https://pro.russiabasket.org")
 TAG = os.getenv("RBF_COMP_TAG", "vtb")
 SEASON = os.getenv("RBF_SEASON", "2026")
-CALENDAR_TYPE = os.getenv("RBF_CALENDAR_TYPE", "").strip()
 
 CALENDAR_ENDPOINT = f"{BASE_URL}/api/abc/comps/calendar"
 OUTPUT_DIR = Path("site")
@@ -21,7 +21,7 @@ ICS_FILENAME = "vtb-united-league.ics"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendar-Bot/2.0"
+USER_AGENT = "VTB-Calendar-Bot/4.0"
 
 
 @dataclass(slots=True)
@@ -52,38 +52,202 @@ def request_json(url: str, params: dict[str, Any]) -> Any:
 def norm(value: Any) -> str | None:
     if value is None:
         return None
-    s = str(value).strip()
-    return s or None
+    text = str(value).strip()
+    return text or None
 
 
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
-
-    text = value.strip()
-    if not text:
-        return None
-
     try:
-        # Пример: 2025-09-28T14:00:00+03:00
-        dt = datetime.fromisoformat(text)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
-
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-
     return dt
 
 
-def build_params() -> dict[str, Any]:
-    params: dict[str, Any] = {
+def build_base_params() -> dict[str, Any]:
+    return {
         "tag": TAG,
         "season": SEASON,
     }
-    if CALENDAR_TYPE:
-        params["calendarType"] = CALENDAR_TYPE
-    return params
+
+
+def extract_items(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def extract_total_count(payload: Any, fallback: int) -> int:
+    if isinstance(payload, dict):
+        total = payload.get("totalCount")
+        if isinstance(total, int):
+            return total
+        if isinstance(total, str) and total.isdigit():
+            return int(total)
+    return fallback
+
+
+def item_signature(item: dict[str, Any]) -> str:
+    game = item.get("game") or {}
+    game_id = norm(game.get("id"))
+    if game_id:
+        return f"game:{game_id}"
+
+    team1 = item.get("team1") or {}
+    team2 = item.get("team2") or {}
+    fallback = {
+        "scheduledTime": game.get("scheduledTime"),
+        "defaultZoneDateTime": game.get("defaultZoneDateTime"),
+        "team1": team1.get("name"),
+        "team2": team2.get("name"),
+    }
+    return json.dumps(fallback, ensure_ascii=False, sort_keys=True)
+
+
+def dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in items:
+        sig = item_signature(item)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        result.append(item)
+
+    return result
+
+
+def fetch_pages_by_key(
+    page_key: str,
+    base_params: dict[str, Any],
+    first_items: list[dict[str, Any]],
+    total_count: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    page_size = max(len(first_items), 1)
+    pages_total = max(math.ceil(total_count / page_size), 1)
+
+    collected: list[dict[str, Any]] = list(first_items)
+    attempts: list[dict[str, Any]] = [
+        {
+            "page_key": page_key,
+            "page_value": 0,
+            "items_count": len(first_items),
+            "unique_total_after_page": len(dedupe_items(collected)),
+            "source": "initial_request",
+        }
+    ]
+
+    stagnant_pages = 0
+    previous_unique_count = len(dedupe_items(collected))
+
+    for page_index in range(1, pages_total):
+        params = {**base_params, page_key: page_index}
+        payload = request_json(CALENDAR_ENDPOINT, params)
+        items = extract_items(payload)
+
+        if not items:
+            attempts.append(
+                {
+                    "page_key": page_key,
+                    "page_value": page_index,
+                    "items_count": 0,
+                    "unique_total_after_page": previous_unique_count,
+                }
+            )
+            break
+
+        collected.extend(items)
+        unique_items = dedupe_items(collected)
+        unique_count = len(unique_items)
+
+        attempts.append(
+            {
+                "page_key": page_key,
+                "page_value": page_index,
+                "items_count": len(items),
+                "unique_total_after_page": unique_count,
+            }
+        )
+
+        if unique_count == previous_unique_count:
+            stagnant_pages += 1
+        else:
+            stagnant_pages = 0
+
+        previous_unique_count = unique_count
+
+        if unique_count >= total_count:
+            collected = unique_items
+            break
+
+        if stagnant_pages >= 2:
+            collected = unique_items
+            break
+
+    return dedupe_items(collected), attempts
+
+
+def fetch_calendar_items(debug: dict[str, Any]) -> list[dict[str, Any]]:
+    base_params = build_base_params()
+
+    first_payload = request_json(CALENDAR_ENDPOINT, base_params)
+    first_items = extract_items(first_payload)
+    total_count = extract_total_count(first_payload, len(first_items))
+
+    debug["request_params"] = base_params
+    debug["top_level_keys"] = list(first_payload.keys()) if isinstance(first_payload, dict) else []
+    debug["status"] = first_payload.get("status") if isinstance(first_payload, dict) else None
+    debug["message"] = first_payload.get("message") if isinstance(first_payload, dict) else None
+    debug["totalCount"] = total_count
+    debug["first_page_items_count"] = len(first_items)
+
+    if len(first_items) >= total_count:
+        debug["pagination_mode"] = "not_needed"
+        debug["chosen_page_key"] = None
+        debug["final_items_count"] = len(first_items)
+        debug["pagination_attempts"] = []
+        return first_items
+
+    schemes = ["index", "page", "pageIndex"]
+    best_items = list(first_items)
+    best_page_key: str | None = None
+    all_attempts: list[dict[str, Any]] = []
+
+    for page_key in schemes:
+        try:
+            items, attempts = fetch_pages_by_key(page_key, base_params, first_items, total_count)
+            all_attempts.append(
+                {
+                    "page_key": page_key,
+                    "unique_items_count": len(items),
+                    "attempts": attempts,
+                }
+            )
+            if len(items) > len(best_items):
+                best_items = items
+                best_page_key = page_key
+        except Exception as exc:
+            all_attempts.append(
+                {
+                    "page_key": page_key,
+                    "error": str(exc),
+                }
+            )
+
+    debug["pagination_mode"] = "paged" if best_page_key else "fallback_first_page_only"
+    debug["chosen_page_key"] = best_page_key
+    debug["final_items_count"] = len(best_items)
+    debug["pagination_attempts"] = all_attempts
+
+    return best_items
 
 
 def build_event(item: dict[str, Any]) -> Event | None:
@@ -143,8 +307,6 @@ def build_event(item: dict[str, Any]) -> Event | None:
         description_lines.append(f"ТВ / видео: {tv}")
 
     description = "\n".join(description_lines) if description_lines else None
-
-    # Для баскетбольного календаря ставим длительность 2 часа по умолчанию
     end = dt + timedelta(hours=2)
 
     return Event(
@@ -158,45 +320,27 @@ def build_event(item: dict[str, Any]) -> Event | None:
     )
 
 
-def fetch_events(debug: dict[str, Any]) -> list[Event]:
-    params = build_params()
-    payload = request_json(CALENDAR_ENDPOINT, params)
-
-    debug["request_params"] = params
-    debug["top_level_keys"] = list(payload.keys()) if isinstance(payload, dict) else []
-    debug["status"] = payload.get("status") if isinstance(payload, dict) else None
-    debug["message"] = payload.get("message") if isinstance(payload, dict) else None
-    debug["totalCount"] = payload.get("totalCount") if isinstance(payload, dict) else None
-
-    items = payload.get("items", []) if isinstance(payload, dict) else []
-    debug["items_count"] = len(items)
-
+def build_events(items: list[dict[str, Any]], debug: dict[str, Any]) -> list[Event]:
     events: list[Event] = []
     skipped: list[dict[str, Any]] = []
 
     for idx, item in enumerate(items):
-        if not isinstance(item, dict):
-            skipped.append({"index": idx, "reason": "item is not dict"})
-            continue
-
         event = build_event(item)
         if event is None:
             skipped.append(
                 {
                     "index": idx,
-                    "reason": "could not build event",
                     "keys": list(item.keys()),
                     "game_id": ((item.get("game") or {}).get("id")),
                 }
             )
             continue
-
         events.append(event)
 
+    events.sort(key=lambda e: (e.start, e.summary))
     debug["built_events"] = len(events)
     debug["skipped_examples"] = skipped[:10]
-
-    return sorted(events, key=lambda e: (e.start, e.summary))
+    return events
 
 
 def ics_escape(value: str) -> str:
@@ -252,7 +396,8 @@ def write_ics(events: list[Event], output_path: Path) -> None:
 
 def render_index(events: list[Event], debug: dict[str, Any]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
-    upcoming = [event for event in events if event.end >= datetime.now(tz=UTC)]
+    now_utc = datetime.now(tz=UTC)
+    upcoming = [event for event in events if event.end >= now_utc]
 
     rows = []
     for event in upcoming[:30]:
@@ -342,7 +487,7 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
   <div class="card">
     <h2>Диагностика</h2>
     <p>Источник: <code>{html.escape(CALENDAR_ENDPOINT)}</code></p>
-    <p>Параметры: <code>{html.escape(json.dumps(build_params(), ensure_ascii=False))}</code></p>
+    <p>Параметры: <code>{html.escape(json.dumps(build_base_params(), ensure_ascii=False))}</code></p>
     <p><a href="/debug.json">Открыть debug.json</a></p>
   </div>
 </body>
@@ -359,10 +504,10 @@ def main() -> None:
         "endpoint": CALENDAR_ENDPOINT,
         "tag": TAG,
         "season": SEASON,
-        "calendarType": CALENDAR_TYPE or None,
     }
 
-    events = fetch_events(debug)
+    items = fetch_calendar_items(debug)
+    events = build_events(items, debug)
 
     debug_payload = {
         **debug,
