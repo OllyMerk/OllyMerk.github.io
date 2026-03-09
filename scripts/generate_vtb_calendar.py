@@ -564,40 +564,37 @@ def main() -> None:
         "tag": TAG,
     }
 
-    events = fetch_all_calendars(debug)
-    if not events:
-        debug["fatal"] = "No events were extracted from the API responses."
-        (OUTPUT_DIR / "debug.json").write_text(
-            json.dumps(debug, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        raise SystemExit("No events extracted. Check site/debug.json in the Pages artifact.")
+   events = fetch_all_calendars(debug)
 
-    write_ics(events, OUTPUT_DIR / ICS_FILENAME)
-    (OUTPUT_DIR / "index.html").write_text(render_index(events, debug), encoding="utf-8")
+payload = {
+    **debug,
+    "events_count": len(events),
+    "first_events": [
+        {
+            **asdict(event),
+            "start": event.start.isoformat(),
+            "end": event.end.isoformat(),
+        }
+        for event in events[:10]
+    ],
+}
+
+if not events:
+    payload["warning"] = "No events were extracted from the API responses."
+    write_ics([], OUTPUT_DIR / ICS_FILENAME)
+    (OUTPUT_DIR / "index.html").write_text(render_index([], debug), encoding="utf-8")
     (OUTPUT_DIR / "debug.json").write_text(
-        json.dumps(
-            {
-                **debug,
-                "events_count": len(events),
-                "first_events": [
-                    {
-                        **asdict(event),
-                        "start": event.start.isoformat(),
-                        "end": event.end.isoformat(),
-                    }
-                    for event in events[:10]
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        ),
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
+    print("No events extracted, but empty calendar and debug.json were published.")
+    return
 
-    print(f"Generated {len(events)} events into {OUTPUT_DIR / ICS_FILENAME}")
+write_ics(events, OUTPUT_DIR / ICS_FILENAME)
+(OUTPUT_DIR / "index.html").write_text(render_index(events, debug), encoding="utf-8")
+(OUTPUT_DIR / "debug.json").write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+    encoding="utf-8",
+)
 
-
-if __name__ == "__main__":
-    main()
+print(f"Generated {len(events)} events into {OUTPUT_DIR / ICS_FILENAME}")
