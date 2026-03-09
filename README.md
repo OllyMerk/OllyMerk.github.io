@@ -1,103 +1,77 @@
-# VTB United League calendar for Apple / Google
+# Basketball calendars for Apple / Google
 
-Готовый минимальный проект для GitHub Pages + GitHub Actions.
+Готовый проект для GitHub Pages + GitHub Actions, который автоматически публикует сайты и подписные `.ics`-календари для трёх соревнований:
 
-Что делает проект:
+- Единая Лига ВТБ
+- Единая Молодежная Лига ВТБ
+- WINLINE Basket Cup
+
+## Что делает проект
+
 - раз в сутки запускает Python-скрипт в GitHub Actions;
-- берет календарь Единой Лиги ВТБ из API РФБ (`AbcComp`) по тегу соревнования `vtb`;
-- собирает файл `vtb-united-league.ics`;
-- публикует его через GitHub Pages;
-- дает одну постоянную ссылку, на которую можно подписаться из Apple Calendar и Google Calendar.
+- берёт календари соревнований из `org.infobasket.su`;
+- генерирует отдельные `.ics`-файлы;
+- публикует отдельные страницы для каждого календаря;
+- публикует главную страницу-хаб со ссылками на все соревнования;
+- даёт прямые ссылки для подписки из Apple Calendar и Google Calendar.
 
-## Что внутри
+## Публичные ссылки
 
-- `scripts/generate_vtb_calendar.py` — генератор `.ics`
-- `.github/workflows/update-vtb-calendar.yml` — ежедневный запуск и публикация
-- `requirements.txt` — зависимости Python
-- `site/` — папка, куда GitHub Actions кладет готовый сайт и `.ics`
+### Главная страница
+- `https://ollymerk.github.io/`
 
-## Как посмотреть
+### Единая Лига ВТБ
+- страница: `https://ollymerk.github.io/vtb/`
+- календарь: `https://ollymerk.github.io/vtb/vtb-united-league.ics`
 
-Сайт:
+### Единая Молодежная Лига ВТБ
+- страница: `https://ollymerk.github.io/vtb-youth/`
+- календарь: `https://ollymerk.github.io/vtb-youth/vtb-youth-league.ics`
 
-```text
-https://OllyMerk.github.io/
-```
+### WINLINE Basket Cup
+- страница: `https://ollymerk.github.io/winline-basket-cup/`
+- календарь: `https://ollymerk.github.io/winline-basket-cup/winline-basket-cup.ics`
 
-ICS файл:
+## Источники данных
 
-```text
-https://OllyMerk.github.io/vtb-united-league.ics
-```
+### Единая Лига ВТБ
+- `https://org.infobasket.su/Comp/GetCalendar/?comps=50714&format=json`
+- `https://org.infobasket.su/Comp/GetCalendarPeriods/50714?lang=ru&period=m`
 
-## Подписка в Apple Calendar
-Используй прямую ссылку на `.ics`.
+### Единая Молодежная Лига ВТБ
+- `https://org.infobasket.su/Comp/GetCalendar/?comps=50719&format=json`
+- `https://org.infobasket.su/Comp/GetCalendarPeriods/50719?lang=ru&period=m`
 
-На Mac обычно это делается через:
-- **Calendar → File → New Calendar Subscription**
+### WINLINE Basket Cup
+- `https://org.infobasket.su/Comp/GetCalendar/?comps=52553&format=json`
+- `https://org.infobasket.su/Comp/GetCalendarPeriods/52553?lang=ru&period=m`
 
-На iPhone/iPad:
-- можно открыть ссылку на `.ics` или добавить подписной календарь через системные настройки/сам календарный клиент, в зависимости от версии iOS.
+## Что внутри репозитория
 
-## Подписка в Google Calendar
-Используй:
-- **Add calendar → From URL**
+- `scripts/generate_all_calendars.py` — генератор всех трёх календарей и HTML-страниц
+- `.github/workflows/update-calendars.yml` — ежедневный запуск и публикация через GitHub Pages
+- `requirements.txt` — Python-зависимости
+- `site/` — итоговая собранная статика, которая публикуется на GitHub Pages
 
-И вставь прямую ссылку на `.ics`.
-
-## Что важно знать
-
-### 1. Проект берет данные не с HTML-страницы, а из API
-Это надежнее, чем парсить визуальную верстку сайта.
-
-Скрипт использует:
-- `tag = vtb`
-- раздел `AbcComp`
-- endpoint для типов календаря
-- endpoint самого календаря
-
-### 2. Скрипт специально сделан с запасом по совместимости
-Так как схема ответа API может отличаться по ключам, скрипт:
-- пробует несколько вариантов query-параметров;
-- сначала запрашивает `calendar-types`;
-- потом пытается получить календарь с разными комбинациями параметров;
-- сохраняет диагностику в `site/debug.json`.
-
-### 3. Если API чуть изменится
-Смотри файл:
+## Структура публикуемого сайта
 
 ```text
-site/debug.json
-```
+site/
+  index.html
+  debug.json
+  .nojekyll
 
-Там будет видно:
-- какие параметры сработали;
-- какие запросы вернули ошибки;
-- сколько событий удалось извлечь.
+  vtb/
+    index.html
+    debug.json
+    vtb-united-league.ics
 
-## Настройка расписания
-По умолчанию workflow запускается раз в сутки:
+  vtb-youth/
+    index.html
+    debug.json
+    vtb-youth-league.ics
 
-```yaml
-schedule:
-  - cron: "17 3 * * *"
-```
-
-Это `03:17 UTC` каждый день.
-
-Если хочешь, поменяй время в файле:
-
-```text
-.github/workflows/update-vtb-calendar.yml
-```
-
-## Ручная настройка переменных
-Если когда-нибудь понадобится поменять базовый URL или тег, можно задать их через environment variables в workflow:
-
-```yaml
-env:
-  RBF_BASE_URL: https://pro.russiabasket.org
-  RBF_COMP_TAG: vtb
-```
-
-Сейчас это уже зашито в коде по умолчанию, так что отдельная настройка не обязательна.
+  winline-basket-cup/
+    index.html
+    debug.json
+    winline-basket-cup.ics
