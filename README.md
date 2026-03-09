@@ -18,12 +18,16 @@
 
 ## Как посмотреть
 
-```text
-Сайт:      https://OllyMerk.github.io/
-```
+Сайт:
 
 ```text
-ICS файл:  https://OllyMerk.github.io/vtb-united-league.ics
+https://OllyMerk.github.io/
+```
+
+ICS файл:
+
+```text
+https://OllyMerk.github.io/vtb-united-league.ics
 ```
 
 ## Подписка в Apple Calendar
