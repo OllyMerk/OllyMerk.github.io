@@ -23,7 +23,7 @@ ICS_FILENAME = "vtb-united-league.ics"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendar-Bot/5.1"
+USER_AGENT = "VTB-Calendar-Bot/5.2"
 
 
 @dataclass(slots=True)
@@ -380,6 +380,7 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
         )
 
     rows_html = "\n".join(rows) if rows else "<tr><td colspan='3'>Нет ближайших матчей</td></tr>"
+    ics_url = f"https://ollymerk.github.io/{ICS_FILENAME}"
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -393,7 +394,7 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
       margin: 40px auto;
       max-width: 1000px;
       padding: 0 18px;
-      line-height: 1.5;
+      line-height: 1.6;
     }}
     .card {{
       border: 1px solid #ddd;
@@ -425,9 +426,13 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
       background: #f4f4f4;
       padding: 2px 6px;
       border-radius: 6px;
+      word-break: break-all;
     }}
     .muted {{
       color: #666;
+    }}
+    h3 {{
+      margin-top: 0;
     }}
   </style>
 </head>
@@ -437,8 +442,38 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
 
   <div class="card">
     <p><a class="button" href="/{ICS_FILENAME}">Открыть .ics файл</a></p>
-    <p>Apple Calendar: подпишись по прямой ссылке на <code>{ICS_FILENAME}</code>.</p>
-    <p>Google Calendar: Add calendar → From URL → та же ссылка.</p>
+    <p>Прямая ссылка для подписки:</p>
+    <p><code>{html.escape(ics_url)}</code></p>
+  </div>
+
+  <div class="card">
+    <h2>Как подписаться</h2>
+
+    <h3>Apple Calendar</h3>
+    <p><strong>На iPhone / iPad:</strong></p>
+    <p>
+      Открой Настройки → Приложения → Календарь → Учетные записи календарей →
+      Добавить учетную запись → Другое → Добавить подписной календарь
+    </p>
+    <p>Вставь ссылку:</p>
+    <p><code>{html.escape(ics_url)}</code></p>
+    <p>Нажми Далее → Сохранить</p>
+
+    <p><strong>На Mac:</strong></p>
+    <p>Открой Calendar → File → New Calendar Subscription</p>
+    <p>Вставь ссылку:</p>
+    <p><code>{html.escape(ics_url)}</code></p>
+    <p>Подтверди подписку</p>
+
+    <h3>Google Calendar</h3>
+    <p>Добавлять такой календарь удобнее через веб-версию Google Calendar:</p>
+    <p>
+      Открой Google Calendar в браузере → слева у блока «Другие календари» нажми «+» →
+      выбери «По URL»
+    </p>
+    <p>Вставь ссылку:</p>
+    <p><code>{html.escape(ics_url)}</code></p>
+    <p>Нажми «Добавить календарь»</p>
   </div>
 
   <div class="card">
