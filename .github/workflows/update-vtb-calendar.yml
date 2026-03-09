@@ -32,8 +32,8 @@ jobs:
 
       - name: Generate ICS and site files
         env:
-          RBF_COMP_TAG: vtb
-          RBF_SEASON: "2026"
+          INFOBASKET_COMP_ID: "50714"
+          INFOBASKET_LANG: "ru"
         run: python scripts/generate_vtb_calendar.py
 
       - name: Setup Pages
