@@ -23,7 +23,7 @@ ICS_FILENAME = "vtb-united-league.ics"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendar-Bot/5.0"
+USER_AGENT = "VTB-Calendar-Bot/5.1"
 
 
 @dataclass(slots=True)
@@ -156,11 +156,33 @@ def build_event(row: dict[str, Any]) -> Event | None:
     comp_name = norm(row.get("CompNameRu"))
     game_number = norm(row.get("GameNumber"))
     tv = norm(row.get("TvRu"))
-    score_a = row.get("ScoreA")
-    score_b = row.get("ScoreB")
     attendance = row.get("GameAttendance")
     display_local = norm(row.get("DisplayDateTimeLocal"))
     display_msk = norm(row.get("DisplayDateTimeMsk"))
+
+    score_a_raw = row.get("ScoreA")
+    score_b_raw = row.get("ScoreB")
+
+    score_a: int | None = None
+    score_b: int | None = None
+
+    try:
+        if score_a_raw is not None:
+            score_a = int(score_a_raw)
+    except (TypeError, ValueError):
+        score_a = None
+
+    try:
+        if score_b_raw is not None:
+            score_b = int(score_b_raw)
+    except (TypeError, ValueError):
+        score_b = None
+
+    show_score = (
+        score_a is not None
+        and score_b is not None
+        and not (score_a == 0 and score_b == 0)
+    )
 
     if league_name:
         description_lines.append(f"Лига: {league_name}")
@@ -172,12 +194,12 @@ def build_event(row: dict[str, Any]) -> Event | None:
         description_lines.append(f"Локальное время: {display_local}")
     if display_msk:
         description_lines.append(f"МСК: {display_msk}")
-    if score_a is not None and score_b is not None:
+    if show_score:
         description_lines.append(f"Счет: {score_a}:{score_b}")
     if attendance:
         description_lines.append(f"Посещаемость: {attendance}")
     if tv:
-        description_lines.append(tv)
+        description_lines.append(f"ТВ: {tv}")
 
     description = "\n".join(description_lines) if description_lines else None
 
@@ -465,8 +487,8 @@ def main() -> None:
             {
                 "uid": event.uid,
                 "summary": event.summary,
-                "start": event.start.isoformat() if isinstance(event.start, datetime) else event.start.isoformat(),
-                "end": event.end.isoformat() if isinstance(event.end, datetime) else event.end.isoformat(),
+                "start": event.start.isoformat(),
+                "end": event.end.isoformat(),
                 "all_day": event.all_day,
                 "location": event.location,
                 "description": event.description,
