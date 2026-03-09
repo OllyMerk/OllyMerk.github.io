@@ -34,44 +34,14 @@ https://<твой_логин>.github.io/
 И тогда календарь будет лежать по адресу:
 
 ```text
-https://<твой_логин>.github.io/vtb-united-league.ics
-```
-
-### Загрузка проекта
-1. Скачай архив проекта.
-2. Распакуй его у себя на компьютере.
-3. В GitHub открой свой репозиторий.
-4. Нажми **Add file → Upload files**.
-5. Перетащи внутрь **все файлы и папки из архива**, а не сам `.zip`.
-6. Нажми **Commit changes**.
-
-### Включение публикации
-1. Открой **Settings → Pages**.
-2. В разделе **Build and deployment** выбери **Source = GitHub Actions**.
-3. Сохрани настройки.
-
-### Первый запуск
-1. Открой вкладку **Actions**.
-2. Слева выбери workflow **Update VTB League calendar**.
-3. Нажми **Run workflow**.
-4. После успешного выполнения открой:
-   - главную страницу сайта;
-   - файл `vtb-united-league.ics`.
-
+https://<твой_логин>.github.io/vtb-united-leag
 ## Ссылки после публикации
 
 ### Если репозиторий называется `<логин>.github.io`
 
 ```text
-Сайт:      https://<логин>.github.io/
-ICS файл:  https://<логин>.github.io/vtb-united-league.ics
-```
-
-### Если репозиторий называется иначе, например `vtb-calendar`
-
-```text
-Сайт:      https://<логин>.github.io/vtb-calendar/
-ICS файл:  https://<логин>.github.io/vtb-calendar/vtb-united-league.ics
+Сайт:      https://OllyMerk.github.io/
+ICS файл:  https://OllyMerk.github.io/vtb-united-league.ics
 ```
 
 ## Подписка в Apple Calendar
