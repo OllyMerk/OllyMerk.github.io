@@ -29,8 +29,9 @@ OUTPUT_ASSETS_DIR = OUTPUT_DIR / "assets"
 OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 
 UTC = timezone.utc
+MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/2.1"
+USER_AGENT = "Basketball-Calendars-Bot/3.0"
 
 
 @dataclass(slots=True)
@@ -93,13 +94,56 @@ COMPETITIONS: list[Competition] = [
     ),
 ]
 
+# Ручные slug'и для публичных URL там, где автоматическая транслитерация была бы неидеальна.
+TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
+    "vtb": {
+        "БЕТСИТИ ПАРМА": "parma",
+        "Пари Нижний Новгород": "pari-nizhny-novgorod",
+        "УНИКС": "unics",
+        "ЦСКА": "cska",
+    },
+    "vtb-youth": {
+        # Можно добавлять позже по итогам проверки.
+    },
+    "winline-basket-cup": {
+        # Можно добавлять позже по итогам проверки.
+    },
+}
 
 TRANSLIT_MAP = {
-    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
-    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
 }
 
 
@@ -194,6 +238,14 @@ def comp_teams_url(comp: Competition) -> str:
     return f"{SITE_BASE_URL}/{comp.slug}/teams/"
 
 
+def team_page_url(comp: Competition, team_slug: str) -> str:
+    return f"{SITE_BASE_URL}/{comp.slug}/teams/{team_slug}/"
+
+
+def team_ics_url(comp: Competition, team_slug: str) -> str:
+    return f"{SITE_BASE_URL}/{comp.slug}/teams/{team_slug}/{team_slug}.ics"
+
+
 def logo_site_path(comp: Competition) -> str | None:
     if not comp.logo_filename:
         return None
@@ -232,6 +284,7 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
     summary = f"{team_a} — {team_b}"
 
+    # Для .ics используем нормализованную временную точку по Москве.
     dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
     if dt_utc is None:
         dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
@@ -397,14 +450,44 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
     return events
 
 
-def collect_team_stats(events: list[Event]) -> list[dict[str, Any]]:
+def build_team_slug_map(comp: Competition, events: list[Event]) -> dict[str, str]:
+    team_names = sorted(
+        {
+            team_name
+            for event in events
+            for team_name in [event.team_a, event.team_b]
+            if team_name
+        }
+    )
+
+    overrides = TEAM_SLUG_OVERRIDES.get(comp.slug, {})
+    slug_map: dict[str, str] = {}
+    used_slugs: set[str] = set()
+
+    for team_name in team_names:
+        base_slug = overrides.get(team_name) or slugify_team_name(team_name)
+        slug = base_slug
+        idx = 2
+        while slug in used_slugs:
+            slug = f"{base_slug}-{idx}"
+            idx += 1
+        slug_map[team_name] = slug
+        used_slugs.add(slug)
+
+    return slug_map
+
+
+def collect_team_stats(comp: Competition, events: list[Event], slug_map: dict[str, str]) -> list[dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
 
     def ensure_team(name: str) -> dict[str, Any]:
         if name not in stats:
+            team_slug = slug_map[name]
             stats[name] = {
                 "name": name,
-                "slug": slugify_team_name(name),
+                "slug": team_slug,
+                "page_url": team_page_url(comp, team_slug),
+                "ics_url": team_ics_url(comp, team_slug),
                 "games_count": 0,
                 "home_games_count": 0,
                 "away_games_count": 0,
@@ -453,8 +536,11 @@ def collect_team_stats(events: list[Event]) -> list[dict[str, Any]]:
                 if event_is_upcoming(event, now_utc):
                     item["upcoming_games_count"] += 1
 
-    result = sorted(stats.values(), key=lambda x: x["name"])
-    return result
+    return sorted(stats.values(), key=lambda x: x["name"])
+
+
+def filter_team_events(events: list[Event], team_name: str) -> list[Event]:
+    return [event for event in events if event.team_a == team_name or event.team_b == team_name]
 
 
 def ics_escape(value: str) -> str:
@@ -531,6 +617,20 @@ def event_is_upcoming(event: Event, now_utc: datetime) -> bool:
     return event.end >= now_utc
 
 
+def format_event_start_for_site(event: Event) -> str:
+    if event.all_day:
+        assert isinstance(event.start, date)
+        return event.start.strftime("%d.%m.%Y")
+    assert isinstance(event.start, datetime)
+    return event.start.astimezone(MSK).strftime("%d.%m.%Y %H:%M МСК")
+
+
+def format_next_game_for_site(utc_iso: str | None) -> str:
+    if not utc_iso:
+        return "—"
+    return datetime.fromisoformat(utc_iso).astimezone(MSK).strftime("%d.%m.%Y %H:%M МСК")
+
+
 def render_logo(comp: Competition, size: int = 52) -> str:
     logo_path = logo_site_path(comp)
     if logo_path and comp.logo_filename and (LOGOS_DIR / comp.logo_filename).exists():
@@ -544,7 +644,7 @@ def render_logo(comp: Competition, size: int = 52) -> str:
         f'background:{html.escape(comp.color_hex)};color:#fff;display:flex;align-items:center;'
         f'justify-content:center;font-weight:700;font-size:16px;">'
         f'{html.escape(comp.short_title[:3])}'
-        f'</div>'
+        f"</div>"
     )
 
 
@@ -750,6 +850,12 @@ def render_card_css() -> str:
       color: #667085;
       margin-top: 6px;
     }
+    .team-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
     """
     
 
@@ -775,26 +881,18 @@ def render_copy_script() -> str:
     """
 
 
-def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, Any]) -> str:
+def render_comp_index(comp: Competition, events: list[Event], team_stats: list[dict[str, Any]], debug: dict[str, Any]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
-    now_utc = datetime.now(tz=UTC)
-    upcoming = [event for event in events if event_is_upcoming(event, now_utc)]
+    upcoming = [event for event in events if event_is_upcoming(event, datetime.now(tz=UTC))]
     ics_url = comp_ics_url(comp)
     color_hex = comp.color_hex
     logo_html = render_logo(comp, size=60)
 
     rows: list[str] = []
     for event in upcoming[:30]:
-        if event.all_day:
-            assert isinstance(event.start, date)
-            local_start = event.start.strftime("%d.%m.%Y")
-        else:
-            assert isinstance(event.start, datetime)
-            local_start = event.start.astimezone().strftime("%d.%м.%Y %H:%M")
-
         rows.append(
             "<tr>"
-            f"<td>{html.escape(local_start)}</td>"
+            f"<td>{html.escape(format_event_start_for_site(event))}</td>"
             f"<td>{html.escape(event.summary)}</td>"
             f"<td>{html.escape(event.location or '')}</td>"
             "</tr>"
@@ -845,7 +943,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
         <div class="title-block">
           <h1>{html.escape(comp.title)}</h1>
           <p>{html.escape(comp.description)}</p>
-          <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}.</p>
+          <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}. Команд: {len(team_stats)}.</p>
         </div>
       </div>
     </div>
@@ -914,7 +1012,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
 
     <div class="card">
       <h2 class="section-title">Календари по командам</h2>
-      <p>Следующий уровень навигации уже подготовлен:</p>
+      <p>Для каждой команды теперь есть отдельная страница и отдельный .ics-файл.</p>
       <p><a class="button" href="./teams/">Открыть раздел команд</a></p>
     </div>
 
@@ -950,12 +1048,6 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
 
     cards: list[str] = []
     for item in team_stats:
-        next_game = item.get("next_game_start_utc")
-        if next_game:
-            next_game_text = datetime.fromisoformat(next_game).astimezone().strftime("%d.%m.%Y %H:%M")
-        else:
-            next_game_text = "—"
-
         cards.append(
             f"""
             <div class="team-card">
@@ -964,7 +1056,11 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
               <div class="team-meta">Матчей: {item["games_count"]}</div>
               <div class="team-meta">Домашних: {item["home_games_count"]} · Гостевых: {item["away_games_count"]}</div>
               <div class="team-meta">Будущих: {item["upcoming_games_count"]}</div>
-              <div class="team-meta">Ближайший матч: {html.escape(next_game_text)}</div>
+              <div class="team-meta">Ближайший матч: {html.escape(format_next_game_for_site(item.get("next_game_start_utc")))}</div>
+              <div class="team-actions">
+                <a class="button" href="/{html.escape(comp.slug)}/teams/{html.escape(item["slug"])}/">Страница команды</a>
+                <a class="button" href="/{html.escape(comp.slug)}/teams/{html.escape(item["slug"])}/{html.escape(item["slug"])}.ics">Подписаться (.ics)</a>
+              </div>
             </div>
             """
         )
@@ -1009,8 +1105,7 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
     </div>
 
     <div class="card">
-      <p>Это промежуточный диагностический этап перед генерацией отдельных календарей по командам.</p>
-      <p>Здесь ты можешь проверить список команд, slugs и распределение матчей.</p>
+      <p>Для каждой команды подготовлена отдельная страница и отдельный подписной календарь.</p>
       <p><a class="subtle-link" href="../teams_debug.json">Открыть teams_debug.json</a></p>
     </div>
 
@@ -1018,6 +1113,116 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
       {cards_html}
     </div>
   </div>
+</body>
+</html>
+"""
+
+
+def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: list[Event]) -> str:
+    color_hex = comp.color_hex
+    logo_html = render_logo(comp, size=56)
+    team_name = team_info["name"]
+    team_slug = team_info["slug"]
+    team_ics = f"./{team_slug}.ics"
+    team_ics_public_url = team_info["ics_url"]
+
+    updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+    upcoming = [event for event in team_events if event_is_upcoming(event, datetime.now(tz=UTC))]
+
+    rows: list[str] = []
+    for event in upcoming[:30]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(format_event_start_for_site(event))}</td>"
+            f"<td>{html.escape(event.summary)}</td>"
+            f"<td>{html.escape(event.location or '')}</td>"
+            "</tr>"
+        )
+    rows_html = "\n".join(rows) if rows else "<tr><td colspan='3'>Нет ближайших матчей</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(team_name)} — {html.escape(comp.title)}</title>
+  <style>
+    {render_card_css()}
+    .hero.team-hero {{
+      background: linear-gradient(135deg, {html.escape(color_hex)} 0%, #ffffff 240%);
+      color: #fff;
+    }}
+    .hero.team-hero p,
+    .hero.team-hero .muted {{
+      color: rgba(255,255,255,0.9);
+    }}
+    .hero-row {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a class="subtle-link" href="/{html.escape(comp.slug)}/teams/">← Назад к списку команд</a></p>
+
+    <div class="hero team-hero">
+      <div class="hero-row">
+        {logo_html}
+        <div>
+          <h1>{html.escape(team_name)}</h1>
+          <p>{html.escape(comp.title)}</p>
+          <p class="muted">Обновлено: {html.escape(updated)}. Матчей в календаре: {len(team_events)}.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <p><a class="button primary" style="background:{html.escape(color_hex)};" href="{html.escape(team_ics)}">Открыть .ics файл команды</a></p>
+      <p><strong>Прямая ссылка для подписки:</strong></p>
+      <div class="inline-tools">
+        <code>{html.escape(team_ics_public_url)}</code>
+        <button class="copy-button" onclick="copyText('{html.escape(team_ics_public_url)}', 'copy-status')">Скопировать</button>
+        <span class="copy-status" id="copy-status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Рекомендуемый цвет календаря</h2>
+      <p>Можно использовать фирменный цвет турнира:</p>
+      <div class="color-row">
+        <span class="color-swatch" style="background:{html.escape(color_hex)};"></span>
+        <code>{html.escape(color_hex)}</code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Как подписаться</h2>
+      <p>Apple Calendar и Google Calendar подключаются по той же прямой ссылке выше.</p>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Ближайшие матчи команды</h2>
+      <table>
+        <thead>
+          <tr><th>Дата / время</th><th>Матч</th><th>Место</th></tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Диагностика</h2>
+      <p>slug: <code>{html.escape(team_slug)}</code></p>
+      <p><a class="subtle-link" href="./debug.json">Открыть debug.json</a></p>
+    </div>
+  </div>
+
+  {render_copy_script()}
 </body>
 </html>
 """
@@ -1116,6 +1321,60 @@ def copy_assets() -> dict[str, Any]:
     return assets_debug
 
 
+def generate_team_pages(comp: Competition, events: list[Event], team_stats: list[dict[str, Any]], comp_dir: Path) -> None:
+    teams_dir = comp_dir / "teams"
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    (teams_dir / "index.html").write_text(
+        render_teams_index(comp, team_stats),
+        encoding="utf-8",
+    )
+
+    for team_info in team_stats:
+        team_name = team_info["name"]
+        team_slug = team_info["slug"]
+        team_events = filter_team_events(events, team_name)
+
+        team_dir = teams_dir / team_slug
+        team_dir.mkdir(parents=True, exist_ok=True)
+
+        team_calendar_name = f"{team_name} — {comp.title}"
+        write_ics(team_events, team_dir / f"{team_slug}.ics", team_calendar_name)
+
+        (team_dir / "index.html").write_text(
+            render_team_page(comp, team_info, team_events),
+            encoding="utf-8",
+        )
+
+        team_debug_payload = {
+            "generated_at_utc": datetime.now(tz=UTC).isoformat(),
+            "competition_slug": comp.slug,
+            "competition_title": comp.title,
+            "team_name": team_name,
+            "team_slug": team_slug,
+            "team_page_url": team_info["page_url"],
+            "team_ics_url": team_info["ics_url"],
+            "events_count": len(team_events),
+            "first_events": [
+                {
+                    "uid": event.uid,
+                    "summary": event.summary,
+                    "start": event.start.isoformat(),
+                    "end": event.end.isoformat(),
+                    "all_day": event.all_day,
+                    "location": event.location,
+                    "description": event.description,
+                    "team_a": event.team_a,
+                    "team_b": event.team_b,
+                }
+                for event in team_events[:10]
+            ],
+        }
+        (team_dir / "debug.json").write_text(
+            json.dumps(team_debug_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
 def generate_for_comp(comp: Competition) -> dict[str, Any]:
     debug: dict[str, Any] = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
@@ -1139,20 +1398,19 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     rows = fetch_calendar_rows(comp, debug)
     fetch_periods(comp, debug)
     events = build_events(rows, comp, debug)
-    team_stats = collect_team_stats(events)
+    slug_map = build_team_slug_map(comp, events)
+    team_stats = collect_team_stats(comp, events, slug_map)
 
     comp_dir = OUTPUT_DIR / comp.slug
     comp_dir.mkdir(parents=True, exist_ok=True)
 
     write_ics(events, comp_dir / comp.ics_filename, comp.title)
-    (comp_dir / "index.html").write_text(render_comp_index(comp, events, debug), encoding="utf-8")
-
-    teams_dir = comp_dir / "teams"
-    teams_dir.mkdir(parents=True, exist_ok=True)
-    (teams_dir / "index.html").write_text(
-        render_teams_index(comp, team_stats),
+    (comp_dir / "index.html").write_text(
+        render_comp_index(comp, events, team_stats, debug),
         encoding="utf-8",
     )
+
+    generate_team_pages(comp, events, team_stats, comp_dir)
 
     debug_payload = {
         **debug,
@@ -1193,8 +1451,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         encoding="utf-8",
     )
 
-    now_utc = datetime.now(tz=UTC)
-    upcoming_count = sum(1 for event in events if event_is_upcoming(event, now_utc))
+    upcoming_count = sum(1 for event in events if event_is_upcoming(event, datetime.now(tz=UTC)))
 
     return {
         "comp": comp,
