@@ -2,34 +2,37 @@ from __future__ import annotations
 
 import html
 import json
-import math
 import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
-BASE_URL = os.getenv("RBF_BASE_URL", "https://pro.russiabasket.org")
-TAG = os.getenv("RBF_COMP_TAG", "vtb")
-SEASON = os.getenv("RBF_SEASON", "2026")
+BASE_URL = os.getenv("INFOBASKET_BASE_URL", "https://org.infobasket.su")
+COMP_ID = os.getenv("INFOBASKET_COMP_ID", "50714")
+LANG = os.getenv("INFOBASKET_LANG", "ru")
 
-CALENDAR_ENDPOINT = f"{BASE_URL}/api/abc/comps/calendar"
+CALENDAR_URL = f"{BASE_URL}/Comp/GetCalendar/"
+PERIODS_URL = f"{BASE_URL}/Comp/GetCalendarPeriods/{COMP_ID}"
+
 OUTPUT_DIR = Path("site")
 ICS_FILENAME = "vtb-united-league.ics"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendar-Bot/4.0"
+USER_AGENT = "VTB-Calendar-Bot/5.0"
 
 
 @dataclass(slots=True)
 class Event:
     uid: str
     summary: str
-    start: datetime
-    end: datetime
+    start: datetime | date
+    end: datetime | date
+    all_day: bool
     location: str | None
     description: str | None
     url: str | None
@@ -56,288 +59,203 @@ def norm(value: Any) -> str | None:
     return text or None
 
 
-def parse_dt(value: str | None) -> datetime | None:
+def parse_ms_ajax_date(value: str | None) -> datetime | None:
+    """
+    Parses strings like /Date(1759057200000)/ or /Date(1759057200000+0300)/
+    into UTC-aware datetime.
+    """
+    if not value:
+        return None
+
+    text = value.strip()
+    match = re.fullmatch(r"/Date\((\-?\d+)([+\-]\d{4})?\)/", text)
+    if not match:
+        return None
+
+    millis = int(match.group(1))
+    return datetime.fromtimestamp(millis / 1000, tz=UTC)
+
+
+def parse_date_ddmmyyyy(value: str | None) -> date | None:
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value)
+        return datetime.strptime(value.strip(), "%d.%m.%Y").date()
     except ValueError:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
 
 
-def build_base_params() -> dict[str, Any]:
+def build_calendar_params() -> dict[str, Any]:
     return {
-        "tag": TAG,
-        "season": SEASON,
+        "comps": COMP_ID,
+        "format": "json",
     }
 
 
-def extract_items(payload: Any) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def extract_total_count(payload: Any, fallback: int) -> int:
-    if isinstance(payload, dict):
-        total = payload.get("totalCount")
-        if isinstance(total, int):
-            return total
-        if isinstance(total, str) and total.isdigit():
-            return int(total)
-    return fallback
-
-
-def item_signature(item: dict[str, Any]) -> str:
-    game = item.get("game") or {}
-    game_id = norm(game.get("id"))
-    if game_id:
-        return f"game:{game_id}"
-
-    team1 = item.get("team1") or {}
-    team2 = item.get("team2") or {}
-    fallback = {
-        "scheduledTime": game.get("scheduledTime"),
-        "defaultZoneDateTime": game.get("defaultZoneDateTime"),
-        "team1": team1.get("name"),
-        "team2": team2.get("name"),
+def build_periods_params() -> dict[str, Any]:
+    return {
+        "lang": LANG,
+        "period": "m",
     }
-    return json.dumps(fallback, ensure_ascii=False, sort_keys=True)
 
 
-def dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for item in items:
-        sig = item_signature(item)
-        if sig in seen:
+    for row in rows:
+        game_id = norm(row.get("GameID"))
+        signature = game_id or json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        if signature in seen:
             continue
-        seen.add(sig)
-        result.append(item)
+        seen.add(signature)
+        unique.append(row)
 
-    return result
-
-
-def fetch_pages_by_key(
-    page_key: str,
-    base_params: dict[str, Any],
-    first_items: list[dict[str, Any]],
-    total_count: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    page_size = max(len(first_items), 1)
-    pages_total = max(math.ceil(total_count / page_size), 1)
-
-    collected: list[dict[str, Any]] = list(first_items)
-    attempts: list[dict[str, Any]] = [
-        {
-            "page_key": page_key,
-            "page_value": 0,
-            "items_count": len(first_items),
-            "unique_total_after_page": len(dedupe_items(collected)),
-            "source": "initial_request",
-        }
-    ]
-
-    stagnant_pages = 0
-    previous_unique_count = len(dedupe_items(collected))
-
-    for page_index in range(1, pages_total):
-        params = {**base_params, page_key: page_index}
-        payload = request_json(CALENDAR_ENDPOINT, params)
-        items = extract_items(payload)
-
-        if not items:
-            attempts.append(
-                {
-                    "page_key": page_key,
-                    "page_value": page_index,
-                    "items_count": 0,
-                    "unique_total_after_page": previous_unique_count,
-                }
-            )
-            break
-
-        collected.extend(items)
-        unique_items = dedupe_items(collected)
-        unique_count = len(unique_items)
-
-        attempts.append(
-            {
-                "page_key": page_key,
-                "page_value": page_index,
-                "items_count": len(items),
-                "unique_total_after_page": unique_count,
-            }
-        )
-
-        if unique_count == previous_unique_count:
-            stagnant_pages += 1
-        else:
-            stagnant_pages = 0
-
-        previous_unique_count = unique_count
-
-        if unique_count >= total_count:
-            collected = unique_items
-            break
-
-        if stagnant_pages >= 2:
-            collected = unique_items
-            break
-
-    return dedupe_items(collected), attempts
+    return unique
 
 
-def fetch_calendar_items(debug: dict[str, Any]) -> list[dict[str, Any]]:
-    base_params = build_base_params()
-
-    first_payload = request_json(CALENDAR_ENDPOINT, base_params)
-    first_items = extract_items(first_payload)
-    total_count = extract_total_count(first_payload, len(first_items))
-
-    debug["request_params"] = base_params
-    debug["top_level_keys"] = list(first_payload.keys()) if isinstance(first_payload, dict) else []
-    debug["status"] = first_payload.get("status") if isinstance(first_payload, dict) else None
-    debug["message"] = first_payload.get("message") if isinstance(first_payload, dict) else None
-    debug["totalCount"] = total_count
-    debug["first_page_items_count"] = len(first_items)
-
-    if len(first_items) >= total_count:
-        debug["pagination_mode"] = "not_needed"
-        debug["chosen_page_key"] = None
-        debug["final_items_count"] = len(first_items)
-        debug["pagination_attempts"] = []
-        return first_items
-
-    schemes = ["index", "page", "pageIndex"]
-    best_items = list(first_items)
-    best_page_key: str | None = None
-    all_attempts: list[dict[str, Any]] = []
-
-    for page_key in schemes:
-        try:
-            items, attempts = fetch_pages_by_key(page_key, base_params, first_items, total_count)
-            all_attempts.append(
-                {
-                    "page_key": page_key,
-                    "unique_items_count": len(items),
-                    "attempts": attempts,
-                }
-            )
-            if len(items) > len(best_items):
-                best_items = items
-                best_page_key = page_key
-        except Exception as exc:
-            all_attempts.append(
-                {
-                    "page_key": page_key,
-                    "error": str(exc),
-                }
-            )
-
-    debug["pagination_mode"] = "paged" if best_page_key else "fallback_first_page_only"
-    debug["chosen_page_key"] = best_page_key
-    debug["final_items_count"] = len(best_items)
-    debug["pagination_attempts"] = all_attempts
-
-    return best_items
-
-
-def build_event(item: dict[str, Any]) -> Event | None:
-    game = item.get("game") or {}
-    team1 = item.get("team1") or {}
-    team2 = item.get("team2") or {}
-    arena = item.get("arena") or {}
-    status = item.get("status") or {}
-    comp = item.get("comp") or {}
-    league = item.get("league") or {}
-    region = item.get("region") or {}
-
-    game_id = norm(game.get("id"))
+def build_event(row: dict[str, Any]) -> Event | None:
+    game_id = norm(row.get("GameID"))
     if not game_id:
         return None
 
-    dt = parse_dt(game.get("scheduledTime")) or parse_dt(game.get("defaultZoneDateTime"))
-    if dt is None:
-        return None
+    team_a = norm(row.get("CompTeamNameAru")) or norm(row.get("ShortTeamNameAru")) or "Команда А"
+    team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
+    summary = f"{team_a} — {team_b}"
 
-    team1_name = norm(team1.get("name")) or norm(team1.get("shortName")) or "Team 1"
-    team2_name = norm(team2.get("name")) or norm(team2.get("shortName")) or "Team 2"
-    summary = f"{team1_name} — {team2_name}"
+    dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
+    if dt_utc is None:
+        dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
 
-    arena_name = norm(arena.get("name")) or norm(arena.get("shortName"))
-    region_name = norm(region.get("name"))
-    location = " / ".join(part for part in [arena_name, region_name] if part) or None
+    has_time = bool(row.get("HasTime", False))
+    game_date = parse_date_ddmmyyyy(norm(row.get("GameDate")))
 
-    league_name = norm(league.get("name"))
-    comp_name = norm(comp.get("name"))
-    status_name = norm(status.get("displayName"))
-    tv = norm(game.get("tv"))
-    score = norm(game.get("score"))
-    full_score = norm(game.get("fullScore"))
-    game_number = norm(game.get("number"))
-    local_date = norm(game.get("localDate"))
-    local_time = norm(game.get("localTime"))
+    all_day = False
+    if dt_utc is None:
+        if game_date is None:
+            return None
+        all_day = True
+        start_value: datetime | date = game_date
+        end_value: datetime | date = game_date + timedelta(days=1)
+    else:
+        if has_time:
+            start_value = dt_utc
+            end_value = dt_utc + timedelta(hours=2)
+        else:
+            all_day = True
+            start_value = game_date or dt_utc.date()
+            end_value = start_value + timedelta(days=1)
 
-    description_lines = []
+    arena = norm(row.get("ArenaRu"))
+    region = norm(row.get("RegionRu"))
+    location = " / ".join(part for part in [arena, region] if part) or None
+
+    description_lines: list[str] = []
+
+    league_name = norm(row.get("LeagueNameRu"))
+    comp_name = norm(row.get("CompNameRu"))
+    game_number = norm(row.get("GameNumber"))
+    tv = norm(row.get("TvRu"))
+    score_a = row.get("ScoreA")
+    score_b = row.get("ScoreB")
+    attendance = row.get("GameAttendance")
+    display_local = norm(row.get("DisplayDateTimeLocal"))
+    display_msk = norm(row.get("DisplayDateTimeMsk"))
+
     if league_name:
         description_lines.append(f"Лига: {league_name}")
     if comp_name:
         description_lines.append(f"Этап: {comp_name}")
     if game_number:
         description_lines.append(f"Номер матча: {game_number}")
-    if status_name:
-        description_lines.append(f"Статус: {status_name}")
-    if local_date or local_time:
-        description_lines.append(
-            f"Локальное время: {' '.join(part for part in [local_date, local_time] if part)}"
-        )
-    if score:
-        description_lines.append(f"Счет: {score}")
-    if full_score:
-        description_lines.append(f"По четвертям: {full_score}")
+    if display_local:
+        description_lines.append(f"Локальное время: {display_local}")
+    if display_msk:
+        description_lines.append(f"МСК: {display_msk}")
+    if score_a is not None and score_b is not None:
+        description_lines.append(f"Счет: {score_a}:{score_b}")
+    if attendance:
+        description_lines.append(f"Посещаемость: {attendance}")
     if tv:
-        description_lines.append(f"ТВ / видео: {tv}")
+        description_lines.append(tv)
 
     description = "\n".join(description_lines) if description_lines else None
-    end = dt + timedelta(hours=2)
 
     return Event(
         uid=f"vtb-{game_id}@ollymerk.github.io",
         summary=summary,
-        start=dt,
-        end=end,
+        start=start_value,
+        end=end_value,
+        all_day=all_day,
         location=location,
         description=description,
         url=None,
     )
 
 
-def build_events(items: list[dict[str, Any]], debug: dict[str, Any]) -> list[Event]:
+def fetch_calendar_rows(debug: dict[str, Any]) -> list[dict[str, Any]]:
+    params = build_calendar_params()
+    payload = request_json(CALENDAR_URL, params)
+
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Expected list from GetCalendar, got {type(payload).__name__}")
+
+    rows = [row for row in payload if isinstance(row, dict)]
+    rows = dedupe_rows(rows)
+
+    debug["calendar_params"] = params
+    debug["calendar_rows_count"] = len(rows)
+    debug["calendar_first_keys"] = list(rows[0].keys()) if rows else []
+
+    return rows
+
+
+def fetch_periods(debug: dict[str, Any]) -> list[dict[str, Any]]:
+    params = build_periods_params()
+    payload = request_json(PERIODS_URL, params)
+
+    periods: list[dict[str, Any]] = []
+    if isinstance(payload, list):
+        periods = [item for item in payload if isinstance(item, dict)]
+    elif isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            periods = [item for item in items if isinstance(item, dict)]
+
+    debug["periods_params"] = params
+    debug["periods_count"] = len(periods)
+    debug["periods_preview"] = periods[:12]
+
+    return periods
+
+
+def build_events(rows: list[dict[str, Any]], debug: dict[str, Any]) -> list[Event]:
     events: list[Event] = []
     skipped: list[dict[str, Any]] = []
 
-    for idx, item in enumerate(items):
-        event = build_event(item)
+    for idx, row in enumerate(rows):
+        event = build_event(row)
         if event is None:
             skipped.append(
                 {
                     "index": idx,
-                    "keys": list(item.keys()),
-                    "game_id": ((item.get("game") or {}).get("id")),
+                    "GameID": row.get("GameID"),
+                    "GameDate": row.get("GameDate"),
+                    "GameDateTime": row.get("GameDateTime"),
                 }
             )
             continue
         events.append(event)
 
-    events.sort(key=lambda e: (e.start, e.summary))
+    def sort_key(event: Event) -> tuple[datetime, str]:
+        if isinstance(event.start, datetime):
+            dt = event.start.astimezone(UTC)
+        else:
+            dt = datetime.combine(event.start, datetime.min.time(), tzinfo=UTC)
+        return dt, event.summary
+
+    events.sort(key=sort_key)
+
     debug["built_events"] = len(events)
     debug["skipped_examples"] = skipped[:10]
     return events
@@ -354,6 +272,10 @@ def ics_escape(value: str) -> str:
 
 def format_ics_datetime(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def format_ics_date(d: date) -> str:
+    return d.strftime("%Y%m%d")
 
 
 def write_ics(events: list[Event], output_path: Path) -> None:
@@ -375,11 +297,21 @@ def write_ics(events: list[Event], output_path: Path) -> None:
                 "BEGIN:VEVENT",
                 f"UID:{ics_escape(event.uid)}",
                 f"DTSTAMP:{dtstamp}",
-                f"DTSTART:{format_ics_datetime(event.start)}",
-                f"DTEND:{format_ics_datetime(event.end)}",
-                f"SUMMARY:{ics_escape(event.summary)}",
             ]
         )
+
+        if event.all_day:
+            assert isinstance(event.start, date)
+            assert isinstance(event.end, date)
+            lines.append(f"DTSTART;VALUE=DATE:{format_ics_date(event.start)}")
+            lines.append(f"DTEND;VALUE=DATE:{format_ics_date(event.end)}")
+        else:
+            assert isinstance(event.start, datetime)
+            assert isinstance(event.end, datetime)
+            lines.append(f"DTSTART:{format_ics_datetime(event.start)}")
+            lines.append(f"DTEND:{format_ics_datetime(event.end)}")
+
+        lines.append(f"SUMMARY:{ics_escape(event.summary)}")
 
         if event.location:
             lines.append(f"LOCATION:{ics_escape(event.location)}")
@@ -397,11 +329,26 @@ def write_ics(events: list[Event], output_path: Path) -> None:
 def render_index(events: list[Event], debug: dict[str, Any]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
     now_utc = datetime.now(tz=UTC)
-    upcoming = [event for event in events if event.end >= now_utc]
 
-    rows = []
+    def is_upcoming(event: Event) -> bool:
+        if event.all_day:
+            assert isinstance(event.end, date)
+            end_dt = datetime.combine(event.end, datetime.min.time(), tzinfo=UTC)
+            return end_dt >= now_utc
+        assert isinstance(event.end, datetime)
+        return event.end >= now_utc
+
+    upcoming = [event for event in events if is_upcoming(event)]
+
+    rows: list[str] = []
     for event in upcoming[:30]:
-        local_start = event.start.astimezone().strftime("%d.%m.%Y %H:%M")
+        if event.all_day:
+            assert isinstance(event.start, date)
+            local_start = event.start.strftime("%d.%m.%Y")
+        else:
+            assert isinstance(event.start, datetime)
+            local_start = event.start.astimezone().strftime("%d.%m.%Y %H:%M")
+
         rows.append(
             "<tr>"
             f"<td>{html.escape(local_start)}</td>"
@@ -410,7 +357,7 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
             "</tr>"
         )
 
-    rows_html = "\n".join(rows) if rows else "<tr><td colspan='3'>Нет матчей</td></tr>"
+    rows_html = "\n".join(rows) if rows else "<tr><td colspan='3'>Нет ближайших матчей</td></tr>"
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -486,8 +433,8 @@ def render_index(events: list[Event], debug: dict[str, Any]) -> str:
 
   <div class="card">
     <h2>Диагностика</h2>
-    <p>Источник: <code>{html.escape(CALENDAR_ENDPOINT)}</code></p>
-    <p>Параметры: <code>{html.escape(json.dumps(build_base_params(), ensure_ascii=False))}</code></p>
+    <p>Источник календаря: <code>{html.escape(CALENDAR_URL)}</code></p>
+    <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(), ensure_ascii=False))}</code></p>
     <p><a href="/debug.json">Открыть debug.json</a></p>
   </div>
 </body>
@@ -501,13 +448,15 @@ def main() -> None:
     debug: dict[str, Any] = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
         "base_url": BASE_URL,
-        "endpoint": CALENDAR_ENDPOINT,
-        "tag": TAG,
-        "season": SEASON,
+        "calendar_url": CALENDAR_URL,
+        "periods_url": PERIODS_URL,
+        "comp_id": COMP_ID,
+        "lang": LANG,
     }
 
-    items = fetch_calendar_items(debug)
-    events = build_events(items, debug)
+    rows = fetch_calendar_rows(debug)
+    fetch_periods(debug)
+    events = build_events(rows, debug)
 
     debug_payload = {
         **debug,
@@ -516,8 +465,9 @@ def main() -> None:
             {
                 "uid": event.uid,
                 "summary": event.summary,
-                "start": event.start.isoformat(),
-                "end": event.end.isoformat(),
+                "start": event.start.isoformat() if isinstance(event.start, datetime) else event.start.isoformat(),
+                "end": event.end.isoformat() if isinstance(event.end, datetime) else event.end.isoformat(),
+                "all_day": event.all_day,
                 "location": event.location,
                 "description": event.description,
                 "url": event.url,
