@@ -19,11 +19,17 @@ LANG = os.getenv("INFOBASKET_LANG", "ru")
 CALENDAR_URL = f"{BASE_URL}/Comp/GetCalendar/"
 PERIODS_URL_TEMPLATE = f"{BASE_URL}/Comp/GetCalendarPeriods/{{comp_id}}"
 
+ROOT_DIR = Path(".")
+ASSETS_DIR = ROOT_DIR / "assets"
+LOGOS_DIR = ASSETS_DIR / "logos"
+
 OUTPUT_DIR = Path("site")
+OUTPUT_ASSETS_DIR = OUTPUT_DIR / "assets"
+OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendars-Bot/1.2"
+USER_AGENT = "Basketball-Calendars-Bot/2.0"
 
 
 @dataclass(slots=True)
@@ -31,8 +37,12 @@ class Competition:
     comp_id: str
     slug: str
     title: str
+    short_title: str
+    description: str
     ics_filename: str
     color_hex: str
+    logo_filename: str | None
+    team_mode: bool = True
 
 
 @dataclass(slots=True)
@@ -45,6 +55,8 @@ class Event:
     location: str | None
     description: str | None
     url: str | None
+    team_a: str | None
+    team_b: str | None
 
 
 COMPETITIONS: list[Competition] = [
@@ -52,22 +64,31 @@ COMPETITIONS: list[Competition] = [
         comp_id="50714",
         slug="vtb",
         title="Единая Лига ВТБ",
+        short_title="VTB",
+        description="Календарь матчей Единой Лиги ВТБ с автообновлением для Apple Calendar и Google Calendar.",
         ics_filename="vtb-united-league.ics",
         color_hex="#010070",
+        logo_filename="vtb.png",
     ),
     Competition(
         comp_id="50719",
         slug="vtb-youth",
         title="Единая Молодежная Лига ВТБ",
+        short_title="VTB Youth",
+        description="Календарь матчей Единой Молодежной Лиги ВТБ с автообновлением для Apple Calendar и Google Calendar.",
         ics_filename="vtb-youth-league.ics",
         color_hex="#1D70B8",
+        logo_filename="vtb-youth.png",
     ),
     Competition(
         comp_id="52553",
         slug="winline-basket-cup",
         title="WINLINE Basket Cup",
+        short_title="WCB",
+        description="Подписной календарь матчей WINLINE Basket Cup с ежедневным обновлением.",
         ics_filename="winline-basket-cup.ics",
         color_hex="#ff6a13",
+        logo_filename="winline-basket-cup.png",
     ),
 ]
 
@@ -141,6 +162,16 @@ def comp_ics_url(comp: Competition) -> str:
     return f"{SITE_BASE_URL}/{comp.slug}/{comp.ics_filename}"
 
 
+def comp_teams_url(comp: Competition) -> str:
+    return f"{SITE_BASE_URL}/{comp.slug}/teams/"
+
+
+def logo_site_path(comp: Competition) -> str | None:
+    if not comp.logo_filename:
+        return None
+    return f"/assets/logos/{comp.logo_filename}"
+
+
 def normalize_tv_line(tv: str | None) -> str | None:
     if not tv:
         return None
@@ -173,9 +204,7 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
     summary = f"{team_a} — {team_b}"
 
-    # КЛЮЧЕВАЯ ПРАВКА:
-    # сначала берем московское время как "нормализованную" временную точку,
-    # а локальное время площадки используем только как запасной вариант.
+    # Используем московское время как нормализованную временную точку.
     dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
     if dt_utc is None:
         dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
@@ -265,6 +294,8 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
         location=location,
         description=description,
         url=None,
+        team_a=team_a,
+        team_b=team_b,
     )
 
 
@@ -337,6 +368,16 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
     debug["built_events"] = len(events)
     debug["skipped_examples"] = skipped[:10]
     return events
+
+
+def extract_team_names(events: list[Event]) -> list[str]:
+    teams: set[str] = set()
+    for event in events:
+        if event.team_a:
+            teams.add(event.team_a)
+        if event.team_b:
+            teams.add(event.team_b)
+    return sorted(teams)
 
 
 def ics_escape(value: str) -> str:
@@ -413,12 +454,235 @@ def event_is_upcoming(event: Event, now_utc: datetime) -> bool:
     return event.end >= now_utc
 
 
+def render_logo(comp: Competition, size: int = 52) -> str:
+    logo_path = logo_site_path(comp)
+    if logo_path and comp.logo_filename and (LOGOS_DIR / comp.logo_filename).exists():
+        return (
+            f'<img src="{html.escape(logo_path)}" alt="{html.escape(comp.title)}" '
+            f'style="width:{size}px;height:{size}px;object-fit:contain;border-radius:12px;background:#fff;padding:6px;">'
+        )
+
+    return (
+        f'<div style="width:{size}px;height:{size}px;border-radius:14px;'
+        f'background:{html.escape(comp.color_hex)};color:#fff;display:flex;align-items:center;'
+        f'justify-content:center;font-weight:700;font-size:16px;">'
+        f'{html.escape(comp.short_title[:3])}'
+        f'</div>'
+    )
+
+
+def render_card_css() -> str:
+    return """
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      background: #f5f7fb;
+      color: #101828;
+    }
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+    .hero {
+      border-radius: 24px;
+      padding: 28px;
+      margin-bottom: 24px;
+      background: linear-gradient(135deg, #ffffff 0%, #eef2ff 100%);
+      border: 1px solid rgba(16, 24, 40, 0.08);
+      box-shadow: 0 10px 30px rgba(16, 24, 40, 0.06);
+    }
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 42px;
+      line-height: 1.05;
+    }
+    .hero p {
+      margin: 0;
+      color: #475467;
+      font-size: 18px;
+    }
+    .card {
+      border-radius: 24px;
+      padding: 22px;
+      margin: 18px 0;
+      background: #ffffff;
+      border: 1px solid rgba(16, 24, 40, 0.08);
+      box-shadow: 0 10px 26px rgba(16, 24, 40, 0.05);
+    }
+    .muted {
+      color: #667085;
+    }
+    .button, button.copy-button {
+      display: inline-block;
+      padding: 12px 16px;
+      border-radius: 12px;
+      text-decoration: none;
+      border: 1px solid rgba(16, 24, 40, 0.12);
+      background: #fff;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      transition: 0.18s ease;
+    }
+    .button:hover, button.copy-button:hover {
+      transform: translateY(-1px);
+      background: #f9fafb;
+    }
+    .button.primary {
+      color: #fff;
+      border: none;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+    th, td {
+      border-bottom: 1px solid #eaecf0;
+      text-align: left;
+      padding: 12px 8px;
+      vertical-align: top;
+    }
+    code {
+      background: #f2f4f7;
+      padding: 4px 8px;
+      border-radius: 8px;
+      word-break: break-all;
+      font-size: 14px;
+    }
+    .inline-tools {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .copy-status {
+      color: #667085;
+      font-size: 14px;
+    }
+    .color-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    .color-swatch {
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      border: 1px solid rgba(0,0,0,0.15);
+      display: inline-block;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+    }
+    .comp-card {
+      border-radius: 24px;
+      padding: 22px;
+      color: #fff;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 14px 30px rgba(16, 24, 40, 0.14);
+    }
+    .comp-card .overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.00) 52%);
+      pointer-events: none;
+    }
+    .comp-card-top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 18px;
+      position: relative;
+      z-index: 1;
+    }
+    .comp-card h2 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+    .comp-card p {
+      margin: 8px 0 0;
+      opacity: 0.95;
+      position: relative;
+      z-index: 1;
+    }
+    .comp-card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+      position: relative;
+      z-index: 1;
+    }
+    .comp-card .button {
+      background: rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #fff;
+      backdrop-filter: blur(6px);
+    }
+    .comp-card .button:hover {
+      background: rgba(255,255,255,0.22);
+    }
+    .pill {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.14);
+      font-size: 13px;
+      font-weight: 600;
+      margin-right: 8px;
+      margin-top: 8px;
+    }
+    .section-title {
+      margin: 0 0 10px;
+      font-size: 28px;
+    }
+    .subtle-link {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(16, 24, 40, 0.12);
+    }
+    """
+    
+
+def render_copy_script() -> str:
+    return """
+    <script>
+      async function copyText(text, statusId) {
+        const status = document.getElementById(statusId);
+        try {
+          await navigator.clipboard.writeText(text);
+          if (status) {
+            status.textContent = "Скопировано";
+            setTimeout(() => { status.textContent = ""; }, 2000);
+          }
+        } catch (err) {
+          if (status) {
+            status.textContent = "Не удалось скопировать";
+            setTimeout(() => { status.textContent = ""; }, 2500);
+          }
+        }
+      }
+    </script>
+    """
+
+
 def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, Any]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
     now_utc = datetime.now(tz=UTC)
     upcoming = [event for event in events if event_is_upcoming(event, now_utc)]
     ics_url = comp_ics_url(comp)
     color_hex = comp.color_hex
+    logo_html = render_logo(comp, size=60)
 
     rows: list[str] = []
     for event in upcoming[:30]:
@@ -446,193 +710,177 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(comp.title)}</title>
   <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 40px auto;
-      max-width: 1000px;
-      padding: 0 18px;
-      line-height: 1.6;
+    {render_card_css()}
+    .hero.comp-hero {{
+      background: linear-gradient(135deg, {html.escape(color_hex)} 0%, #ffffff 240%);
+      color: #fff;
+      position: relative;
+      overflow: hidden;
     }}
-    .card {{
-      border: 1px solid #ddd;
-      border-radius: 14px;
-      padding: 18px;
-      margin: 18px 0;
+    .hero.comp-hero p,
+    .hero.comp-hero .muted {{
+      color: rgba(255,255,255,0.9);
     }}
-    a.button, button.copy-button {{
-      display: inline-block;
-      padding: 12px 16px;
-      border-radius: 10px;
-      text-decoration: none;
-      border: 1px solid #222;
-      margin-right: 10px;
+    .hero-row {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }}
+    .hero-row .title-block {{
+      flex: 1;
+      min-width: 240px;
+    }}
+    .hero-row h1 {{
       margin-bottom: 10px;
-      color: inherit;
-      background: #fff;
-      cursor: pointer;
-      font: inherit;
     }}
-    button.copy-button:hover {{
-      background: #f7f7f7;
-    }}
-    .inline-tools {{
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px;
-      margin-top: 8px;
-    }}
-    .copy-status {{
-      color: #666;
-      font-size: 14px;
-    }}
-    .color-row {{
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-top: 8px;
-      flex-wrap: wrap;
-    }}
-    .color-swatch {{
-      width: 22px;
-      height: 22px;
-      border-radius: 6px;
-      border: 1px solid rgba(0,0,0,0.15);
-      background: {html.escape(color_hex)};
-      display: inline-block;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 12px;
-    }}
-    th, td {{
-      border-bottom: 1px solid #eee;
-      text-align: left;
-      padding: 10px 8px;
-      vertical-align: top;
-    }}
-    code {{
-      background: #f4f4f4;
-      padding: 2px 6px;
-      border-radius: 6px;
-      word-break: break-all;
-    }}
-    .muted {{
-      color: #666;
-    }}
-    h3 {{
-      margin-top: 0;
+    .teams-card {{
+      border-style: dashed;
     }}
   </style>
 </head>
 <body>
-  <p><a href="/">← Все календари</a></p>
-  <h1>{html.escape(comp.title)}</h1>
-  <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}.</p>
+  <div class="wrap">
+    <p><a class="subtle-link" href="/">← Все календари</a></p>
 
-  <div class="card">
-    <p><a class="button" href="./{html.escape(comp.ics_filename)}">Открыть .ics файл</a></p>
-    <p><strong>Прямая ссылка для подписки:</strong></p>
-    <div class="inline-tools">
-      <code id="ics-url">{html.escape(ics_url)}</code>
-      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status')">Скопировать</button>
-      <span class="copy-status" id="copy-status"></span>
+    <div class="hero comp-hero">
+      <div class="hero-row">
+        {logo_html}
+        <div class="title-block">
+          <h1>{html.escape(comp.title)}</h1>
+          <p>{html.escape(comp.description)}</p>
+          <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <p><a class="button primary" style="background:{html.escape(color_hex)};" href="./{html.escape(comp.ics_filename)}">Открыть .ics файл</a></p>
+      <p><strong>Прямая ссылка для подписки:</strong></p>
+      <div class="inline-tools">
+        <code id="ics-url">{html.escape(ics_url)}</code>
+        <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status')">Скопировать</button>
+        <span class="copy-status" id="copy-status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Рекомендуемый цвет календаря</h2>
+      <p>При желании можно вручную задать этот цвет в приложении календаря:</p>
+      <div class="color-row">
+        <span class="color-swatch" style="background:{html.escape(color_hex)};"></span>
+        <code>{html.escape(color_hex)}</code>
+      </div>
+      <p class="muted">Автоматически через .ics цвет не назначается — это ограничение клиентов Apple / Google Calendar.</p>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Как подписаться</h2>
+
+      <h3>Apple Calendar</h3>
+      <p><strong>На iPhone / iPad:</strong></p>
+      <p>
+        Открой Настройки → Приложения → Календарь → Учетные записи календарей →
+        Добавить учетную запись → Другое → Добавить подписной календарь
+      </p>
+      <p>Вставь ссылку:</p>
+      <div class="inline-tools">
+        <code>{html.escape(ics_url)}</code>
+        <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-apple')">Скопировать</button>
+        <span class="copy-status" id="copy-status-apple"></span>
+      </div>
+      <p>Нажми Далее → Сохранить</p>
+
+      <p><strong>На Mac:</strong></p>
+      <p>Открой Calendar → File → New Calendar Subscription</p>
+      <p>Вставь ссылку:</p>
+      <div class="inline-tools">
+        <code>{html.escape(ics_url)}</code>
+        <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-mac')">Скопировать</button>
+        <span class="copy-status" id="copy-status-mac"></span>
+      </div>
+      <p>Подтверди подписку</p>
+
+      <h3>Google Calendar</h3>
+      <p>Добавлять такой календарь удобнее через веб-версию Google Calendar:</p>
+      <p>
+        Открой Google Calendar в браузере → слева у блока «Другие календари» нажми «+» →
+        выбери «По URL»
+      </p>
+      <p>Вставь ссылку:</p>
+      <div class="inline-tools">
+        <code>{html.escape(ics_url)}</code>
+        <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-google')">Скопировать</button>
+        <span class="copy-status" id="copy-status-google"></span>
+      </div>
+      <p>Нажми «Добавить календарь»</p>
+    </div>
+
+    <div class="card teams-card">
+      <h2 class="section-title">Календари по командам</h2>
+      <p>Этот раздел подготовлен для следующего этапа. Здесь появятся отдельные страницы и .ics-файлы по командам внутри турнира.</p>
+      <p><a class="button" href="./teams/">Открыть раздел команд</a></p>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Ближайшие матчи</h2>
+      <table>
+        <thead>
+          <tr><th>Дата / время</th><th>Матч</th><th>Место</th></tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Диагностика</h2>
+      <p>Источник календаря: <code>{html.escape(CALENDAR_URL)}</code></p>
+      <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(comp), ensure_ascii=False))}</code></p>
+      <p><a class="subtle-link" href="./debug.json">Открыть debug.json</a></p>
     </div>
   </div>
 
-  <div class="card">
-    <h2>Рекомендуемый цвет календаря</h2>
-    <p>При желании можно вручную задать этот цвет в приложении календаря:</p>
-    <div class="color-row">
-      <span class="color-swatch" aria-hidden="true"></span>
-      <code>{html.escape(color_hex)}</code>
+  {render_copy_script()}
+</body>
+</html>
+"""
+
+
+def render_teams_placeholder(comp: Competition, team_names: list[str]) -> str:
+    team_list_html = ""
+    if team_names:
+        preview = "".join(f"<li>{html.escape(name)}</li>" for name in team_names[:30])
+        team_list_html = f"""
+        <p class="muted">Ниже — предварительный список команд, найденных в календаре:</p>
+        <ul>
+          {preview}
+        </ul>
+        """
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Команды — {html.escape(comp.title)}</title>
+  <style>
+    {render_card_css()}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p><a class="subtle-link" href="/{html.escape(comp.slug)}/">← Назад к календарю соревнования</a></p>
+    <div class="hero">
+      <h1>Командные календари</h1>
+      <p>{html.escape(comp.title)}</p>
     </div>
-    <p class="muted">Автоматически через .ics цвет не назначается — это ограничение клиентов Apple / Google Calendar.</p>
-  </div>
-
-  <div class="card">
-    <h2>Как подписаться</h2>
-
-    <h3>Apple Calendar</h3>
-    <p><strong>На iPhone / iPad:</strong></p>
-    <p>
-      Открой Настройки → Приложения → Календарь → Учетные записи календарей →
-      Добавить учетную запись → Другое → Добавить подписной календарь
-    </p>
-    <p>Вставь ссылку:</p>
-    <div class="inline-tools">
-      <code>{html.escape(ics_url)}</code>
-      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-apple')">Скопировать</button>
-      <span class="copy-status" id="copy-status-apple"></span>
+    <div class="card">
+      <p>Этот раздел уже подготовлен технически. Следующим этапом здесь появятся отдельные календари по командам.</p>
+      {team_list_html}
     </div>
-    <p>Нажми Далее → Сохранить</p>
-
-    <p><strong>На Mac:</strong></p>
-    <p>Открой Calendar → File → New Calendar Subscription</p>
-    <p>Вставь ссылку:</p>
-    <div class="inline-tools">
-      <code>{html.escape(ics_url)}</code>
-      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-mac')">Скопировать</button>
-      <span class="copy-status" id="copy-status-mac"></span>
-    </div>
-    <p>Подтверди подписку</p>
-
-    <h3>Google Calendar</h3>
-    <p>Добавлять такой календарь удобнее через веб-версию Google Calendar:</p>
-    <p>
-      Открой Google Calendar в браузере → слева у блока «Другие календари» нажми «+» →
-      выбери «По URL»
-    </p>
-    <p>Вставь ссылку:</p>
-    <div class="inline-tools">
-      <code>{html.escape(ics_url)}</code>
-      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-google')">Скопировать</button>
-      <span class="copy-status" id="copy-status-google"></span>
-    </div>
-    <p>Нажми «Добавить календарь»</p>
   </div>
-
-  <div class="card">
-    <h2>Ближайшие матчи</h2>
-    <table>
-      <thead>
-        <tr><th>Дата / время</th><th>Матч</th><th>Место</th></tr>
-      </thead>
-      <tbody>
-        {rows_html}
-      </tbody>
-    </table>
-  </div>
-
-  <div class="card">
-    <h2>Диагностика</h2>
-    <p>Источник календаря: <code>{html.escape(CALENDAR_URL)}</code></p>
-    <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(comp), ensure_ascii=False))}</code></p>
-    <p><a href="./debug.json">Открыть debug.json</a></p>
-  </div>
-
-  <script>
-    async function copyText(text, statusId) {{
-      const status = document.getElementById(statusId);
-      try {{
-        await navigator.clipboard.writeText(text);
-        if (status) {{
-          status.textContent = "Скопировано";
-          setTimeout(() => {{
-            status.textContent = "";
-          }}, 2000);
-        }}
-      }} catch (err) {{
-        if (status) {{
-          status.textContent = "Не удалось скопировать";
-          setTimeout(() => {{
-            status.textContent = "";
-          }}, 2500);
-        }}
-      }}
-    }}
-  </script>
 </body>
 </html>
 """
@@ -646,16 +894,29 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
         comp: Competition = result["comp"]
         events_count: int = result["events_count"]
         upcoming_count: int = result["upcoming_count"]
+        logo_html = render_logo(comp, size=56)
 
         cards.append(
             f"""
-            <div class="card">
-              <h2>{html.escape(comp.title)}</h2>
-              <p class="muted">Событий: {events_count}. Ближайших / будущих: {upcoming_count}.</p>
-              <p>
+            <div class="comp-card" style="background: linear-gradient(135deg, {html.escape(comp.color_hex)} 0%, rgba(0,0,0,0.78) 100%);">
+              <div class="overlay"></div>
+              <div class="comp-card-top">
+                {logo_html}
+                <div>
+                  <h2>{html.escape(comp.title)}</h2>
+                  <p>{html.escape(comp.description)}</p>
+                </div>
+              </div>
+
+              <div style="position:relative;z-index:1;">
+                <span class="pill">Событий: {events_count}</span>
+                <span class="pill">Ближайших / будущих: {upcoming_count}</span>
+              </div>
+
+              <div class="comp-card-actions">
                 <a class="button" href="/{html.escape(comp.slug)}/">Открыть сайт календаря</a>
                 <a class="button" href="/{html.escape(comp.slug)}/{html.escape(comp.ics_filename)}">Подписаться (.ics)</a>
-              </p>
+              </div>
             </div>
             """
         )
@@ -669,39 +930,21 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Баскетбольные календари</title>
   <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 40px auto;
-      max-width: 1000px;
-      padding: 0 18px;
-      line-height: 1.6;
-    }}
-    .card {{
-      border: 1px solid #ddd;
-      border-radius: 14px;
-      padding: 18px;
-      margin: 18px 0;
-    }}
-    a.button {{
-      display: inline-block;
-      padding: 12px 16px;
-      border-radius: 10px;
-      text-decoration: none;
-      border: 1px solid #222;
-      margin-right: 10px;
-      margin-bottom: 10px;
-      color: inherit;
-    }}
-    .muted {{
-      color: #666;
-    }}
+    {render_card_css()}
   </style>
 </head>
 <body>
-  <h1>Баскетбольные календари</h1>
-  <p class="muted">Обновлено: {html.escape(updated)}.</p>
-  <p>Выбери соревнование, открой его страницу и подпишись на календарь на iPhone, Mac или в Google Calendar.</p>
-  {cards_html}
+  <div class="wrap">
+    <div class="hero">
+      <h1>Баскетбольные календари</h1>
+      <p>Подписные календари с автообновлением для Apple Calendar и Google Calendar.</p>
+      <p class="muted" style="margin-top:10px;">Обновлено: {html.escape(updated)}.</p>
+    </div>
+
+    <div class="grid">
+      {cards_html}
+    </div>
+  </div>
 </body>
 </html>
 """
@@ -714,6 +957,28 @@ def ensure_clean_site() -> None:
     (OUTPUT_DIR / ".nojekyll").write_text("", encoding="utf-8")
 
 
+def copy_assets() -> dict[str, Any]:
+    assets_debug: dict[str, Any] = {
+        "assets_dir_exists": ASSETS_DIR.exists(),
+        "logos_dir_exists": LOGOS_DIR.exists(),
+        "copied_files": [],
+    }
+
+    if OUTPUT_ASSETS_DIR.exists():
+        shutil.rmtree(OUTPUT_ASSETS_DIR)
+    OUTPUT_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_LOGOS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if LOGOS_DIR.exists():
+        for file_path in LOGOS_DIR.iterdir():
+            if file_path.is_file():
+                target = OUTPUT_LOGOS_DIR / file_path.name
+                shutil.copy2(file_path, target)
+                assets_debug["copied_files"].append(file_path.name)
+
+    return assets_debug
+
+
 def generate_for_comp(comp: Competition) -> dict[str, Any]:
     debug: dict[str, Any] = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
@@ -724,15 +989,20 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "lang": LANG,
         "slug": comp.slug,
         "title": comp.title,
+        "short_title": comp.short_title,
+        "description": comp.description,
         "ics_filename": comp.ics_filename,
         "site_url": comp_site_url(comp),
         "ics_url": comp_ics_url(comp),
+        "teams_url": comp_teams_url(comp),
         "color_hex": comp.color_hex,
+        "logo_filename": comp.logo_filename,
     }
 
     rows = fetch_calendar_rows(comp, debug)
     fetch_periods(comp, debug)
     events = build_events(rows, comp, debug)
+    team_names = extract_team_names(events)
 
     comp_dir = OUTPUT_DIR / comp.slug
     comp_dir.mkdir(parents=True, exist_ok=True)
@@ -740,8 +1010,17 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     write_ics(events, comp_dir / comp.ics_filename, comp.title)
     (comp_dir / "index.html").write_text(render_comp_index(comp, events, debug), encoding="utf-8")
 
+    teams_dir = comp_dir / "teams"
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    (teams_dir / "index.html").write_text(
+        render_teams_placeholder(comp, team_names),
+        encoding="utf-8",
+    )
+
     debug_payload = {
         **debug,
+        "teams_detected_count": len(team_names),
+        "teams_detected_preview": team_names[:50],
         "events_count": len(events),
         "first_events": [
             {
@@ -753,6 +1032,8 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
                 "location": event.location,
                 "description": event.description,
                 "url": event.url,
+                "team_a": event.team_a,
+                "team_b": event.team_b,
             }
             for event in events[:10]
         ],
@@ -769,11 +1050,13 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "comp": comp,
         "events_count": len(events),
         "upcoming_count": upcoming_count,
+        "teams_detected_count": len(team_names),
     }
 
 
 def main() -> None:
     ensure_clean_site()
+    assets_debug = copy_assets()
 
     results: list[dict[str, Any]] = []
     for comp in COMPETITIONS:
@@ -785,17 +1068,22 @@ def main() -> None:
     summary = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
         "site_base_url": SITE_BASE_URL,
+        "assets_debug": assets_debug,
         "competitions": [
             {
                 "comp_id": result["comp"].comp_id,
                 "slug": result["comp"].slug,
                 "title": result["comp"].title,
+                "short_title": result["comp"].short_title,
                 "ics_filename": result["comp"].ics_filename,
                 "color_hex": result["comp"].color_hex,
+                "logo_filename": result["comp"].logo_filename,
                 "site_url": comp_site_url(result["comp"]),
                 "ics_url": comp_ics_url(result["comp"]),
+                "teams_url": comp_teams_url(result["comp"]),
                 "events_count": result["events_count"],
                 "upcoming_count": result["upcoming_count"],
+                "teams_detected_count": result["teams_detected_count"],
             }
             for result in results
         ],
