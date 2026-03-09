@@ -5,14 +5,12 @@ import html
 import json
 import os
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlencode
 
 import requests
-from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 from zoneinfo import ZoneInfo
 
@@ -175,13 +173,13 @@ def parse_dt(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        # Heuristic: treat big integers as Unix timestamps in ms.
         num = float(value)
         if num > 10_000_000_000:
             num /= 1000.0
         return datetime.fromtimestamp(num, tz=UTC)
     if not isinstance(value, str):
         return None
+
     text = value.strip()
     if not text:
         return None
@@ -212,6 +210,7 @@ def parse_dt(value: Any) -> datetime | None:
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=MOSCOW_TZ)
+
     return dt
 
 
@@ -284,7 +283,10 @@ def extract_calendar_type_values(payload: Any) -> list[Any]:
 
     for node in walk(payload):
         if isinstance(node, dict):
-            value = pick_any(node, ["id", "value", "code", "slug", "key", "type", "calendarType", "calendar_type"])
+            value = pick_any(
+                node,
+                ["id", "value", "code", "slug", "key", "type", "calendarType", "calendar_type"],
+            )
             label = normalize_string(pick_any(node, ["name", "title", "label"]))
             if value is None:
                 continue
@@ -381,6 +383,7 @@ def build_calendar_param_candidates(
                     if signature not in seen:
                         seen.add(signature)
                         candidates.append(params)
+
     return candidates
 
 
@@ -416,7 +419,6 @@ def fetch_all_calendars(debug: dict[str, Any]) -> list[Event]:
         successful_calls += 1
         all_events.extend(events)
 
-    # Last fallback: direct request with tag-only if the discovered types produced nothing.
     if not all_events:
         for params in ({"tag": TAG}, {"comp_tag": TAG}, {}):
             try:
@@ -426,6 +428,7 @@ def fetch_all_calendars(debug: dict[str, Any]) -> list[Event]:
                     {"params": params, "ok": False, "error": str(exc)}
                 )
                 continue
+
             events = extract_event_candidates(payload, source_params={"endpoint": "calendar", **params})
             debug.setdefault("calendar_direct_fallback", []).append(
                 {"params": params, "ok": True, "event_candidates": len(events)}
@@ -498,9 +501,10 @@ def write_ics(events: list[Event], output_path: Path) -> None:
 def render_index(events: list[Event], debug: dict[str, Any]) -> str:
     updated = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M MSK")
     future_events = [event for event in events if event.start >= datetime.now(tz=UTC) - timedelta(days=1)]
+
     upcoming_rows = []
     for event in future_events[:20]:
-        start_local = event.start.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+        start_local = event.start.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%М")
         upcoming_rows.append(
             f"<tr><td>{html.escape(start_local)}</td><td>{html.escape(event.summary)}</td><td>{html.escape(event.location or '')}</td></tr>"
         )
@@ -564,37 +568,41 @@ def main() -> None:
         "tag": TAG,
     }
 
-   events = fetch_all_calendars(debug)
+    events = fetch_all_calendars(debug)
 
-payload = {
-    **debug,
-    "events_count": len(events),
-    "first_events": [
-        {
-            **asdict(event),
-            "start": event.start.isoformat(),
-            "end": event.end.isoformat(),
-        }
-        for event in events[:10]
-    ],
-}
+    payload = {
+        **debug,
+        "events_count": len(events),
+        "first_events": [
+            {
+                **asdict(event),
+                "start": event.start.isoformat(),
+                "end": event.end.isoformat(),
+            }
+            for event in events[:10]
+        ],
+    }
 
-if not events:
-    payload["warning"] = "No events were extracted from the API responses."
-    write_ics([], OUTPUT_DIR / ICS_FILENAME)
-    (OUTPUT_DIR / "index.html").write_text(render_index([], debug), encoding="utf-8")
+    if not events:
+        payload["warning"] = "No events were extracted from the API responses."
+        write_ics([], OUTPUT_DIR / ICS_FILENAME)
+        (OUTPUT_DIR / "index.html").write_text(render_index([], debug), encoding="utf-8")
+        (OUTPUT_DIR / "debug.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        print("No events extracted, but empty calendar and debug.json were published.")
+        return
+
+    write_ics(events, OUTPUT_DIR / ICS_FILENAME)
+    (OUTPUT_DIR / "index.html").write_text(render_index(events, debug), encoding="utf-8")
     (OUTPUT_DIR / "debug.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-    print("No events extracted, but empty calendar and debug.json were published.")
-    return
 
-write_ics(events, OUTPUT_DIR / ICS_FILENAME)
-(OUTPUT_DIR / "index.html").write_text(render_index(events, debug), encoding="utf-8")
-(OUTPUT_DIR / "debug.json").write_text(
-    json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-    encoding="utf-8",
-)
+    print(f"Generated {len(events)} events into {OUTPUT_DIR / ICS_FILENAME}")
 
-print(f"Generated {len(events)} events into {OUTPUT_DIR / ICS_FILENAME}")
+
+if __name__ == "__main__":
+    main()
