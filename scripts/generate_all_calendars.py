@@ -23,7 +23,7 @@ OUTPUT_DIR = Path("site")
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendars-Bot/1.1"
+USER_AGENT = "VTB-Calendars-Bot/1.2"
 
 
 @dataclass(slots=True)
@@ -173,9 +173,12 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
     summary = f"{team_a} — {team_b}"
 
-    dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
+    # КЛЮЧЕВАЯ ПРАВКА:
+    # сначала берем московское время как "нормализованную" временную точку,
+    # а локальное время площадки используем только как запасной вариант.
+    dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
     if dt_utc is None:
-        dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
+        dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
 
     has_time = bool(row.get("HasTime", False))
     game_date = parse_date_ddmmyyyy(norm(row.get("GameDate")))
@@ -316,6 +319,7 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
                     "GameID": row.get("GameID"),
                     "GameDate": row.get("GameDate"),
                     "GameDateTime": row.get("GameDateTime"),
+                    "GameDateTimeMoscow": row.get("GameDateTimeMoscow"),
                 }
             )
             continue
