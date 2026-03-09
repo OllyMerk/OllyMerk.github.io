@@ -23,7 +23,7 @@ OUTPUT_DIR = Path("site")
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "VTB-Calendars-Bot/1.0"
+USER_AGENT = "VTB-Calendars-Bot/1.1"
 
 
 @dataclass(slots=True)
@@ -32,6 +32,7 @@ class Competition:
     slug: str
     title: str
     ics_filename: str
+    color_hex: str
 
 
 @dataclass(slots=True)
@@ -52,18 +53,21 @@ COMPETITIONS: list[Competition] = [
         slug="vtb",
         title="Единая Лига ВТБ",
         ics_filename="vtb-united-league.ics",
+        color_hex="#010070",
     ),
     Competition(
         comp_id="50719",
         slug="vtb-youth",
         title="Единая Молодежная Лига ВТБ",
         ics_filename="vtb-youth-league.ics",
+        color_hex="#1D70B8",
     ),
     Competition(
         comp_id="52553",
         slug="winline-basket-cup",
         title="WINLINE Basket Cup",
         ics_filename="winline-basket-cup.ics",
+        color_hex="#ff6a13",
     ),
 ]
 
@@ -410,6 +414,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
     now_utc = datetime.now(tz=UTC)
     upcoming = [event for event in events if event_is_upcoming(event, now_utc)]
     ics_url = comp_ics_url(comp)
+    color_hex = comp.color_hex
 
     rows: list[str] = []
     for event in upcoming[:30]:
@@ -450,7 +455,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       padding: 18px;
       margin: 18px 0;
     }}
-    a.button {{
+    a.button, button.copy-button {{
       display: inline-block;
       padding: 12px 16px;
       border-radius: 10px;
@@ -459,6 +464,38 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       margin-right: 10px;
       margin-bottom: 10px;
       color: inherit;
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+    }}
+    button.copy-button:hover {{
+      background: #f7f7f7;
+    }}
+    .inline-tools {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+    }}
+    .copy-status {{
+      color: #666;
+      font-size: 14px;
+    }}
+    .color-row {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }}
+    .color-swatch {{
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      border: 1px solid rgba(0,0,0,0.15);
+      background: {html.escape(color_hex)};
+      display: inline-block;
     }}
     table {{
       width: 100%;
@@ -492,8 +529,22 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
 
   <div class="card">
     <p><a class="button" href="./{html.escape(comp.ics_filename)}">Открыть .ics файл</a></p>
-    <p>Прямая ссылка для подписки:</p>
-    <p><code>{html.escape(ics_url)}</code></p>
+    <p><strong>Прямая ссылка для подписки:</strong></p>
+    <div class="inline-tools">
+      <code id="ics-url">{html.escape(ics_url)}</code>
+      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status')">Скопировать</button>
+      <span class="copy-status" id="copy-status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Рекомендуемый цвет календаря</h2>
+    <p>При желании можно вручную задать этот цвет в приложении календаря:</p>
+    <div class="color-row">
+      <span class="color-swatch" aria-hidden="true"></span>
+      <code>{html.escape(color_hex)}</code>
+    </div>
+    <p class="muted">Автоматически через .ics цвет не назначается — это ограничение клиентов Apple / Google Calendar.</p>
   </div>
 
   <div class="card">
@@ -506,13 +557,21 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       Добавить учетную запись → Другое → Добавить подписной календарь
     </p>
     <p>Вставь ссылку:</p>
-    <p><code>{html.escape(ics_url)}</code></p>
+    <div class="inline-tools">
+      <code>{html.escape(ics_url)}</code>
+      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-apple')">Скопировать</button>
+      <span class="copy-status" id="copy-status-apple"></span>
+    </div>
     <p>Нажми Далее → Сохранить</p>
 
     <p><strong>На Mac:</strong></p>
     <p>Открой Calendar → File → New Calendar Subscription</p>
     <p>Вставь ссылку:</p>
-    <p><code>{html.escape(ics_url)}</code></p>
+    <div class="inline-tools">
+      <code>{html.escape(ics_url)}</code>
+      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-mac')">Скопировать</button>
+      <span class="copy-status" id="copy-status-mac"></span>
+    </div>
     <p>Подтверди подписку</p>
 
     <h3>Google Calendar</h3>
@@ -522,7 +581,11 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       выбери «По URL»
     </p>
     <p>Вставь ссылку:</p>
-    <p><code>{html.escape(ics_url)}</code></p>
+    <div class="inline-tools">
+      <code>{html.escape(ics_url)}</code>
+      <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status-google')">Скопировать</button>
+      <span class="copy-status" id="copy-status-google"></span>
+    </div>
     <p>Нажми «Добавить календарь»</p>
   </div>
 
@@ -544,6 +607,28 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
     <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(comp), ensure_ascii=False))}</code></p>
     <p><a href="./debug.json">Открыть debug.json</a></p>
   </div>
+
+  <script>
+    async function copyText(text, statusId) {{
+      const status = document.getElementById(statusId);
+      try {{
+        await navigator.clipboard.writeText(text);
+        if (status) {{
+          status.textContent = "Скопировано";
+          setTimeout(() => {{
+            status.textContent = "";
+          }}, 2000);
+        }}
+      }} catch (err) {{
+        if (status) {{
+          status.textContent = "Не удалось скопировать";
+          setTimeout(() => {{
+            status.textContent = "";
+          }}, 2500);
+        }}
+      }}
+    }}
+  </script>
 </body>
 </html>
 """
@@ -638,6 +723,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "ics_filename": comp.ics_filename,
         "site_url": comp_site_url(comp),
         "ics_url": comp_ics_url(comp),
+        "color_hex": comp.color_hex,
     }
 
     rows = fetch_calendar_rows(comp, debug)
@@ -701,6 +787,7 @@ def main() -> None:
                 "slug": result["comp"].slug,
                 "title": result["comp"].title,
                 "ics_filename": result["comp"].ics_filename,
+                "color_hex": result["comp"].color_hex,
                 "site_url": comp_site_url(result["comp"]),
                 "ics_url": comp_ics_url(result["comp"]),
                 "events_count": result["events_count"],
