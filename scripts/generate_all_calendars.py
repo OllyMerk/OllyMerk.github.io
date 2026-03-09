@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 
 UTC = timezone.utc
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/2.0"
+USER_AGENT = "Basketball-Calendars-Bot/2.1"
 
 
 @dataclass(slots=True)
@@ -93,6 +94,15 @@ COMPETITIONS: list[Competition] = [
 ]
 
 
+TRANSLIT_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
 def request_json(url: str, params: dict[str, Any]) -> Any:
     response = requests.get(
         url,
@@ -134,6 +144,24 @@ def parse_date_ddmmyyyy(value: str | None) -> date | None:
         return datetime.strptime(value.strip(), "%d.%m.%Y").date()
     except ValueError:
         return None
+
+
+def transliterate(text: str) -> str:
+    result: list[str] = []
+    for ch in text.lower():
+        result.append(TRANSLIT_MAP.get(ch, ch))
+    return "".join(result)
+
+
+def slugify_team_name(name: str) -> str:
+    text = transliterate(name)
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text or "team"
 
 
 def build_calendar_params(comp: Competition) -> dict[str, Any]:
@@ -204,7 +232,6 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
     summary = f"{team_a} — {team_b}"
 
-    # Используем московское время как нормализованную временную точку.
     dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
     if dt_utc is None:
         dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
@@ -370,14 +397,64 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
     return events
 
 
-def extract_team_names(events: list[Event]) -> list[str]:
-    teams: set[str] = set()
+def collect_team_stats(events: list[Event]) -> list[dict[str, Any]]:
+    stats: dict[str, dict[str, Any]] = {}
+
+    def ensure_team(name: str) -> dict[str, Any]:
+        if name not in stats:
+            stats[name] = {
+                "name": name,
+                "slug": slugify_team_name(name),
+                "games_count": 0,
+                "home_games_count": 0,
+                "away_games_count": 0,
+                "upcoming_games_count": 0,
+                "latest_game_start_utc": None,
+                "next_game_start_utc": None,
+                "sample_matchups": [],
+            }
+        return stats[name]
+
+    now_utc = datetime.now(tz=UTC)
+
     for event in events:
+        start_dt_utc: datetime | None = None
+        if isinstance(event.start, datetime):
+            start_dt_utc = event.start.astimezone(UTC)
+
+        teams_for_event: list[tuple[str, str]] = []
         if event.team_a:
-            teams.add(event.team_a)
+            teams_for_event.append((event.team_a, "home"))
         if event.team_b:
-            teams.add(event.team_b)
-    return sorted(teams)
+            teams_for_event.append((event.team_b, "away"))
+
+        for team_name, side in teams_for_event:
+            item = ensure_team(team_name)
+            item["games_count"] += 1
+            if side == "home":
+                item["home_games_count"] += 1
+            else:
+                item["away_games_count"] += 1
+
+            if len(item["sample_matchups"]) < 5:
+                item["sample_matchups"].append(event.summary)
+
+            if start_dt_utc is not None:
+                latest_game = item["latest_game_start_utc"]
+                if latest_game is None or start_dt_utc > datetime.fromisoformat(latest_game):
+                    item["latest_game_start_utc"] = start_dt_utc.isoformat()
+
+                if event_is_upcoming(event, now_utc):
+                    item["upcoming_games_count"] += 1
+                    next_game = item["next_game_start_utc"]
+                    if next_game is None or start_dt_utc < datetime.fromisoformat(next_game):
+                        item["next_game_start_utc"] = start_dt_utc.isoformat()
+            else:
+                if event_is_upcoming(event, now_utc):
+                    item["upcoming_games_count"] += 1
+
+    result = sorted(stats.values(), key=lambda x: x["name"])
+    return result
 
 
 def ics_escape(value: str) -> str:
@@ -651,6 +728,28 @@ def render_card_css() -> str:
       text-decoration: none;
       border-bottom: 1px solid rgba(16, 24, 40, 0.12);
     }
+    .teams-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .team-card {
+      border: 1px solid rgba(16, 24, 40, 0.08);
+      border-radius: 18px;
+      padding: 16px;
+      background: #fff;
+    }
+    .team-card h3 {
+      margin: 0 0 8px;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+    .team-meta {
+      font-size: 14px;
+      color: #667085;
+      margin-top: 6px;
+    }
     """
     
 
@@ -691,7 +790,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
             local_start = event.start.strftime("%d.%m.%Y")
         else:
             assert isinstance(event.start, datetime)
-            local_start = event.start.astimezone().strftime("%d.%m.%Y %H:%M")
+            local_start = event.start.astimezone().strftime("%d.%м.%Y %H:%M")
 
         rows.append(
             "<tr>"
@@ -734,9 +833,6 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
     .hero-row h1 {{
       margin-bottom: 10px;
     }}
-    .teams-card {{
-      border-style: dashed;
-    }}
   </style>
 </head>
 <body>
@@ -758,7 +854,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       <p><a class="button primary" style="background:{html.escape(color_hex)};" href="./{html.escape(comp.ics_filename)}">Открыть .ics файл</a></p>
       <p><strong>Прямая ссылка для подписки:</strong></p>
       <div class="inline-tools">
-        <code id="ics-url">{html.escape(ics_url)}</code>
+        <code>{html.escape(ics_url)}</code>
         <button class="copy-button" onclick="copyText('{html.escape(ics_url)}', 'copy-status')">Скопировать</button>
         <span class="copy-status" id="copy-status"></span>
       </div>
@@ -816,9 +912,9 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       <p>Нажми «Добавить календарь»</p>
     </div>
 
-    <div class="card teams-card">
+    <div class="card">
       <h2 class="section-title">Календари по командам</h2>
-      <p>Этот раздел подготовлен для следующего этапа. Здесь появятся отдельные страницы и .ics-файлы по командам внутри турнира.</p>
+      <p>Следующий уровень навигации уже подготовлен:</p>
       <p><a class="button" href="./teams/">Открыть раздел команд</a></p>
     </div>
 
@@ -839,6 +935,7 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
       <p>Источник календаря: <code>{html.escape(CALENDAR_URL)}</code></p>
       <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(comp), ensure_ascii=False))}</code></p>
       <p><a class="subtle-link" href="./debug.json">Открыть debug.json</a></p>
+      <p><a class="subtle-link" href="./teams_debug.json">Открыть teams_debug.json</a></p>
     </div>
   </div>
 
@@ -848,16 +945,31 @@ def render_comp_index(comp: Competition, events: list[Event], debug: dict[str, A
 """
 
 
-def render_teams_placeholder(comp: Competition, team_names: list[str]) -> str:
-    team_list_html = ""
-    if team_names:
-        preview = "".join(f"<li>{html.escape(name)}</li>" for name in team_names[:30])
-        team_list_html = f"""
-        <p class="muted">Ниже — предварительный список команд, найденных в календаре:</p>
-        <ul>
-          {preview}
-        </ul>
-        """
+def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> str:
+    logo_html = render_logo(comp, size=56)
+
+    cards: list[str] = []
+    for item in team_stats:
+        next_game = item.get("next_game_start_utc")
+        if next_game:
+            next_game_text = datetime.fromisoformat(next_game).astimezone().strftime("%d.%m.%Y %H:%M")
+        else:
+            next_game_text = "—"
+
+        cards.append(
+            f"""
+            <div class="team-card">
+              <h3>{html.escape(item["name"])}</h3>
+              <div class="team-meta">slug: <code>{html.escape(item["slug"])}</code></div>
+              <div class="team-meta">Матчей: {item["games_count"]}</div>
+              <div class="team-meta">Домашних: {item["home_games_count"]} · Гостевых: {item["away_games_count"]}</div>
+              <div class="team-meta">Будущих: {item["upcoming_games_count"]}</div>
+              <div class="team-meta">Ближайший матч: {html.escape(next_game_text)}</div>
+            </div>
+            """
+        )
+
+    cards_html = "\n".join(cards) if cards else "<p>Команды не найдены.</p>"
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -867,18 +979,43 @@ def render_teams_placeholder(comp: Competition, team_names: list[str]) -> str:
   <title>Команды — {html.escape(comp.title)}</title>
   <style>
     {render_card_css()}
+    .hero.comp-hero {{
+      background: linear-gradient(135deg, {html.escape(comp.color_hex)} 0%, #ffffff 240%);
+      color: #fff;
+    }}
+    .hero.comp-hero p {{
+      color: rgba(255,255,255,0.9);
+    }}
+    .hero-row {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <p><a class="subtle-link" href="/{html.escape(comp.slug)}/">← Назад к календарю соревнования</a></p>
-    <div class="hero">
-      <h1>Командные календари</h1>
-      <p>{html.escape(comp.title)}</p>
+
+    <div class="hero comp-hero">
+      <div class="hero-row">
+        {logo_html}
+        <div>
+          <h1>Команды</h1>
+          <p>{html.escape(comp.title)}</p>
+        </div>
+      </div>
     </div>
+
     <div class="card">
-      <p>Этот раздел уже подготовлен технически. Следующим этапом здесь появятся отдельные календари по командам.</p>
-      {team_list_html}
+      <p>Это промежуточный диагностический этап перед генерацией отдельных календарей по командам.</p>
+      <p>Здесь ты можешь проверить список команд, slugs и распределение матчей.</p>
+      <p><a class="subtle-link" href="../teams_debug.json">Открыть teams_debug.json</a></p>
+    </div>
+
+    <div class="teams-grid">
+      {cards_html}
     </div>
   </div>
 </body>
@@ -1002,7 +1139,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     rows = fetch_calendar_rows(comp, debug)
     fetch_periods(comp, debug)
     events = build_events(rows, comp, debug)
-    team_names = extract_team_names(events)
+    team_stats = collect_team_stats(events)
 
     comp_dir = OUTPUT_DIR / comp.slug
     comp_dir.mkdir(parents=True, exist_ok=True)
@@ -1013,14 +1150,14 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     teams_dir = comp_dir / "teams"
     teams_dir.mkdir(parents=True, exist_ok=True)
     (teams_dir / "index.html").write_text(
-        render_teams_placeholder(comp, team_names),
+        render_teams_index(comp, team_stats),
         encoding="utf-8",
     )
 
     debug_payload = {
         **debug,
-        "teams_detected_count": len(team_names),
-        "teams_detected_preview": team_names[:50],
+        "teams_detected_count": len(team_stats),
+        "teams_detected_preview": [item["name"] for item in team_stats[:50]],
         "events_count": len(events),
         "first_events": [
             {
@@ -1043,6 +1180,19 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         encoding="utf-8",
     )
 
+    teams_debug_payload = {
+        "generated_at_utc": datetime.now(tz=UTC).isoformat(),
+        "comp_id": comp.comp_id,
+        "slug": comp.slug,
+        "title": comp.title,
+        "teams_count": len(team_stats),
+        "teams": team_stats,
+    }
+    (comp_dir / "teams_debug.json").write_text(
+        json.dumps(teams_debug_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     now_utc = datetime.now(tz=UTC)
     upcoming_count = sum(1 for event in events if event_is_upcoming(event, now_utc))
 
@@ -1050,7 +1200,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "comp": comp,
         "events_count": len(events),
         "upcoming_count": upcoming_count,
-        "teams_detected_count": len(team_names),
+        "teams_detected_count": len(team_stats),
     }
 
 
