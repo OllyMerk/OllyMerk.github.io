@@ -31,7 +31,7 @@ OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 UTC = timezone.utc
 MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/3.2"
+USER_AGENT = "Basketball-Calendars-Bot/3.3"
 
 
 @dataclass(slots=True)
@@ -101,8 +101,30 @@ TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
         "УНИКС": "unics",
         "ЦСКА": "cska",
     },
-    "vtb-youth": {},
-    "winline-basket-cup": {},
+    "vtb-youth": {
+        "МБА-МАИ-Юниор": "mba-mai-junior",
+        "Нижний Новгород-Мещерский": "nizhny-novgorod-meshchersky",
+        "УНИКС-2": "unics-2",
+        "ЦСКА-Юниор": "cska-junior",
+        "ЦСП-Химки-2": "csp-khimki-2",
+    },
+    "winline-basket-cup": {
+        "Игокеа м:тел": "igokea-mtel",
+        "УНИКС": "unics",
+    },
+}
+
+TEAM_EXCLUDE_FROM_TEAM_PAGES: dict[str, set[str]] = {
+    "winline-basket-cup": {
+        "1A",
+        "1B",
+        "2A",
+        "2B",
+        "Победитель 1/2 финала (1)",
+        "Победитель 1/2 финала (2)",
+        "Проигравший в 1/2 финала (1)",
+        "Проигравший в 1/2 финала (2)",
+    }
 }
 
 TRANSLIT_MAP = {
@@ -245,6 +267,10 @@ def logo_site_path(comp: Competition) -> str | None:
     if not comp.logo_filename:
         return None
     return f"/assets/logos/{comp.logo_filename}"
+
+
+def get_excluded_team_names(comp: Competition) -> set[str]:
+    return TEAM_EXCLUDE_FROM_TEAM_PAGES.get(comp.slug, set())
 
 
 def normalize_tv_line(tv: str | None) -> str | None:
@@ -445,12 +471,13 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
 
 
 def build_team_slug_map(comp: Competition, events: list[Event]) -> dict[str, str]:
+    excluded_names = get_excluded_team_names(comp)
     team_names = sorted(
         {
             team_name
             for event in events
             for team_name in [event.team_a, event.team_b]
-            if team_name
+            if team_name and team_name not in excluded_names
         }
     )
 
@@ -473,6 +500,7 @@ def build_team_slug_map(comp: Competition, events: list[Event]) -> dict[str, str
 
 def collect_team_stats(comp: Competition, events: list[Event], slug_map: dict[str, str]) -> list[dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
+    excluded_names = get_excluded_team_names(comp)
 
     def ensure_team(name: str) -> dict[str, Any]:
         if name not in stats:
@@ -500,9 +528,9 @@ def collect_team_stats(comp: Competition, events: list[Event], slug_map: dict[st
             start_dt_utc = event.start.astimezone(UTC)
 
         teams_for_event: list[tuple[str, str]] = []
-        if event.team_a:
+        if event.team_a and event.team_a not in excluded_names:
             teams_for_event.append((event.team_a, "home"))
-        if event.team_b:
+        if event.team_b and event.team_b not in excluded_names:
             teams_for_event.append((event.team_b, "away"))
 
         for team_name, side in teams_for_event:
@@ -1466,6 +1494,8 @@ def generate_team_pages(comp: Competition, events: list[Event], team_stats: list
 
 
 def generate_for_comp(comp: Competition) -> dict[str, Any]:
+    excluded_names = sorted(get_excluded_team_names(comp))
+
     debug: dict[str, Any] = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
         "base_url": BASE_URL,
@@ -1483,6 +1513,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "teams_url": comp_teams_url(comp),
         "color_hex": comp.color_hex,
         "logo_filename": comp.logo_filename,
+        "excluded_team_names": excluded_names,
     }
 
     rows = fetch_calendar_rows(comp, debug)
@@ -1533,6 +1564,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "comp_id": comp.comp_id,
         "slug": comp.slug,
         "title": comp.title,
+        "excluded_team_names": excluded_names,
         "teams_count": len(team_stats),
         "teams": team_stats,
     }
