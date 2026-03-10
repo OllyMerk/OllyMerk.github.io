@@ -31,7 +31,7 @@ OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 UTC = timezone.utc
 MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/3.0"
+USER_AGENT = "Basketball-Calendars-Bot/3.1"
 
 
 @dataclass(slots=True)
@@ -94,7 +94,6 @@ COMPETITIONS: list[Competition] = [
     ),
 ]
 
-# Ручные slug'и для публичных URL там, где автоматическая транслитерация была бы неидеальна.
 TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
     "vtb": {
         "БЕТСИТИ ПАРМА": "parma",
@@ -102,12 +101,8 @@ TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
         "УНИКС": "unics",
         "ЦСКА": "cska",
     },
-    "vtb-youth": {
-        # Можно добавлять позже по итогам проверки.
-    },
-    "winline-basket-cup": {
-        # Можно добавлять позже по итогам проверки.
-    },
+    "vtb-youth": {},
+    "winline-basket-cup": {},
 }
 
 TRANSLIT_MAP = {
@@ -284,7 +279,6 @@ def build_event(row: dict[str, Any], comp: Competition) -> Event | None:
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
     summary = f"{team_a} — {team_b}"
 
-    # Для .ics используем нормализованную временную точку по Москве.
     dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
     if dt_utc is None:
         dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTime")))
@@ -711,6 +705,12 @@ def render_card_css() -> str:
       color: #fff;
       border: none;
     }
+    .nav-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -857,7 +857,7 @@ def render_card_css() -> str:
       margin-top: 14px;
     }
     """
-    
+
 
 def render_copy_script() -> str:
     return """
@@ -1123,7 +1123,7 @@ def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: 
     logo_html = render_logo(comp, size=56)
     team_name = team_info["name"]
     team_slug = team_info["slug"]
-    team_ics = f"./{team_slug}.ics"
+    team_ics_filename = f"{team_slug}.ics"
     team_ics_public_url = team_info["ics_url"]
 
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
@@ -1166,7 +1166,10 @@ def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: 
 </head>
 <body>
   <div class="wrap">
-    <p><a class="subtle-link" href="/{html.escape(comp.slug)}/teams/">← Назад к списку команд</a></p>
+    <div class="nav-buttons">
+      <a class="button" href="/{html.escape(comp.slug)}/">Назад к турниру</a>
+      <a class="button" href="/{html.escape(comp.slug)}/teams/">Все команды</a>
+    </div>
 
     <div class="hero team-hero">
       <div class="hero-row">
@@ -1180,8 +1183,9 @@ def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: 
     </div>
 
     <div class="card">
-      <p><a class="button primary" style="background:{html.escape(color_hex)};" href="{html.escape(team_ics)}">Открыть .ics файл команды</a></p>
-      <p><strong>Прямая ссылка для подписки:</strong></p>
+      <h2 class="section-title">Подписка на календарь команды</h2>
+      <p><a class="button primary" style="background:{html.escape(color_hex)};" href="./{html.escape(team_ics_filename)}">Открыть .ics файл команды</a></p>
+      <p><strong>Прямая ссылка на календарь команды:</strong></p>
       <div class="inline-tools">
         <code>{html.escape(team_ics_public_url)}</code>
         <button class="copy-button" onclick="copyText('{html.escape(team_ics_public_url)}', 'copy-status')">Скопировать</button>
@@ -1200,7 +1204,7 @@ def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: 
 
     <div class="card">
       <h2 class="section-title">Как подписаться</h2>
-      <p>Apple Calendar и Google Calendar подключаются по той же прямой ссылке выше.</p>
+      <p>Apple Calendar и Google Calendar подключаются по прямой ссылке выше.</p>
     </div>
 
     <div class="card">
