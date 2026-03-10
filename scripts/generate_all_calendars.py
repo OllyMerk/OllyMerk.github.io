@@ -31,7 +31,7 @@ OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 UTC = timezone.utc
 MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/3.1"
+USER_AGENT = "Basketball-Calendars-Bot/3.2"
 
 
 @dataclass(slots=True)
@@ -856,6 +856,31 @@ def render_card_css() -> str:
       gap: 8px;
       margin-top: 14px;
     }
+    .search-bar {
+      width: 100%;
+      max-width: 420px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(16, 24, 40, 0.12);
+      font: inherit;
+      font-size: 16px;
+      box-sizing: border-box;
+      background: #fff;
+    }
+    .search-meta {
+      margin-top: 10px;
+      color: #667085;
+      font-size: 14px;
+    }
+    .empty-search {
+      display: none;
+      margin-top: 18px;
+      padding: 18px;
+      border-radius: 16px;
+      background: #fff;
+      border: 1px dashed rgba(16, 24, 40, 0.16);
+      color: #667085;
+    }
     """
 
 
@@ -877,6 +902,49 @@ def render_copy_script() -> str:
           }
         }
       }
+    </script>
+    """
+
+
+def render_team_search_script() -> str:
+    return """
+    <script>
+      function initTeamSearch() {
+        const input = document.getElementById("team-search");
+        const cards = Array.from(document.querySelectorAll(".team-card[data-team-name]"));
+        const countEl = document.getElementById("teams-visible-count");
+        const emptyEl = document.getElementById("teams-empty-state");
+        const total = cards.length;
+
+        function applyFilter() {
+          const query = (input.value || "").trim().toLowerCase();
+          let visible = 0;
+
+          cards.forEach((card) => {
+            const teamName = card.dataset.teamName || "";
+            const teamSlug = card.dataset.teamSlug || "";
+            const haystack = `${teamName} ${teamSlug}`.toLowerCase();
+            const show = query === "" || haystack.includes(query);
+            card.style.display = show ? "" : "none";
+            if (show) visible += 1;
+          });
+
+          if (countEl) {
+            countEl.textContent = `${visible} из ${total}`;
+          }
+
+          if (emptyEl) {
+            emptyEl.style.display = visible === 0 ? "block" : "none";
+          }
+        }
+
+        if (input) {
+          input.addEventListener("input", applyFilter);
+          applyFilter();
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", initTeamSearch);
     </script>
     """
 
@@ -1050,7 +1118,7 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
     for item in team_stats:
         cards.append(
             f"""
-            <div class="team-card">
+            <div class="team-card" data-team-name="{html.escape(item["name"].lower())}" data-team-slug="{html.escape(item["slug"].lower())}">
               <h3>{html.escape(item["name"])}</h3>
               <div class="team-meta">slug: <code>{html.escape(item["slug"])}</code></div>
               <div class="team-meta">Матчей: {item["games_count"]}</div>
@@ -1109,10 +1177,28 @@ def render_teams_index(comp: Competition, team_stats: list[dict[str, Any]]) -> s
       <p><a class="subtle-link" href="../teams_debug.json">Открыть teams_debug.json</a></p>
     </div>
 
-    <div class="teams-grid">
+    <div class="card">
+      <h2 class="section-title">Поиск по командам</h2>
+      <input
+        id="team-search"
+        class="search-bar"
+        type="text"
+        placeholder="Начни вводить название команды..."
+        autocomplete="off"
+      >
+      <div class="search-meta">Найдено: <span id="teams-visible-count">{len(team_stats)} из {len(team_stats)}</span></div>
+    </div>
+
+    <div class="teams-grid" id="teams-grid">
       {cards_html}
     </div>
+
+    <div class="empty-search" id="teams-empty-state">
+      По этому запросу команды не найдены.
+    </div>
   </div>
+
+  {render_team_search_script()}
 </body>
 </html>
 """
