@@ -17,6 +17,12 @@ BASE_URL = os.getenv("INFOBASKET_BASE_URL", "https://org.infobasket.su")
 SITE_BASE_URL = os.getenv("SITE_BASE_URL", "https://ollymerk.github.io").rstrip("/")
 LANG = os.getenv("INFOBASKET_LANG", "ru")
 
+GITHUB_REPO_WEB_URL = os.getenv(
+    "GITHUB_REPO_WEB_URL",
+    "https://github.com/OllyMerk/OllyMerk.github.io",
+).rstrip("/")
+GITHUB_WORKFLOW_FILE = os.getenv("GITHUB_WORKFLOW_FILE", "update-calendars.yml")
+
 CALENDAR_URL = f"{BASE_URL}/Comp/GetCalendar/"
 PERIODS_URL_TEMPLATE = f"{BASE_URL}/Comp/GetCalendarPeriods/{{comp_id}}"
 
@@ -31,7 +37,7 @@ OUTPUT_LOGOS_DIR = OUTPUT_ASSETS_DIR / "logos"
 UTC = timezone.utc
 MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
-USER_AGENT = "Basketball-Calendars-Bot/3.3"
+USER_AGENT = "Basketball-Calendars-Bot/3.4"
 
 
 @dataclass(slots=True)
@@ -176,6 +182,10 @@ def request_json(url: str, params: dict[str, Any]) -> Any:
     )
     response.raise_for_status()
     return response.json()
+
+
+def github_workflow_url() -> str:
+    return f"{GITHUB_REPO_WEB_URL}/actions/workflows/{GITHUB_WORKFLOW_FILE}"
 
 
 def norm(value: Any) -> str | None:
@@ -701,6 +711,12 @@ def render_card_css() -> str:
       color: #475467;
       font-size: 18px;
     }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
     .card {
       border-radius: 24px;
       padding: 22px;
@@ -982,6 +998,7 @@ def render_comp_index(comp: Competition, events: list[Event], team_stats: list[d
     upcoming = [event for event in events if event_is_upcoming(event, datetime.now(tz=UTC))]
     ics_url = comp_ics_url(comp)
     color_hex = comp.color_hex
+    workflow_url = github_workflow_url()
     logo_html = render_logo(comp, size=60)
 
     rows: list[str] = []
@@ -1042,6 +1059,18 @@ def render_comp_index(comp: Competition, events: list[Event], team_stats: list[d
           <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}. Команд: {len(team_stats)}.</p>
         </div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Обновление календаря</h2>
+      <p>Календари обновляются автоматически раз в час через GitHub Actions.</p>
+      <p>При необходимости можно вручную открыть страницу workflow и запустить обновление.</p>
+      <p>
+        <a class="button" href="{html.escape(workflow_url)}" target="_blank" rel="noopener noreferrer">
+          Открыть GitHub Actions
+        </a>
+      </p>
+      <p class="muted">Ручной запуск сработает для пользователя, у которого есть доступ к репозиторию.</p>
     </div>
 
     <div class="card">
@@ -1128,6 +1157,7 @@ def render_comp_index(comp: Competition, events: list[Event], team_stats: list[d
       <h2 class="section-title">Диагностика</h2>
       <p>Источник календаря: <code>{html.escape(CALENDAR_URL)}</code></p>
       <p>Параметры: <code>{html.escape(json.dumps(build_calendar_params(comp), ensure_ascii=False))}</code></p>
+      <p>Workflow: <code>{html.escape(workflow_url)}</code></p>
       <p><a class="subtle-link" href="./debug.json">Открыть debug.json</a></p>
       <p><a class="subtle-link" href="./teams_debug.json">Открыть teams_debug.json</a></p>
     </div>
@@ -1348,6 +1378,7 @@ def render_team_page(comp: Competition, team_info: dict[str, Any], team_events: 
 
 def render_root_index(results: list[dict[str, Any]]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+    workflow_url = github_workflow_url()
 
     cards: list[str] = []
     for result in results:
@@ -1399,6 +1430,14 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
       <h1>Баскетбольные календари</h1>
       <p>Подписные календари с автообновлением для Apple Calendar и Google Calendar.</p>
       <p class="muted" style="margin-top:10px;">Обновлено: {html.escape(updated)}.</p>
+      <div class="hero-actions">
+        <a class="button" href="{html.escape(workflow_url)}" target="_blank" rel="noopener noreferrer">
+          Запустить обновление
+        </a>
+      </div>
+      <p class="muted" style="margin-top:12px;">
+        Кнопка ведёт на GitHub Actions. Ручной запуск доступен пользователю с правами на репозиторий.
+      </p>
     </div>
 
     <div class="grid">
@@ -1513,6 +1552,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "teams_url": comp_teams_url(comp),
         "color_hex": comp.color_hex,
         "logo_filename": comp.logo_filename,
+        "workflow_url": github_workflow_url(),
         "excluded_team_names": excluded_names,
     }
 
@@ -1597,6 +1637,7 @@ def main() -> None:
     summary = {
         "generated_at_utc": datetime.now(tz=UTC).isoformat(),
         "site_base_url": SITE_BASE_URL,
+        "workflow_url": github_workflow_url(),
         "assets_debug": assets_debug,
         "competitions": [
             {
