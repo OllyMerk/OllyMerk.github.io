@@ -89,6 +89,24 @@ VTB_SEASONS = tuple(
     for season in os.getenv("VTB_SEASONS", "2026,2027").split(",")
     if season.strip()
 )
+VTB_YOUTH_SEASONS = tuple(
+    season.strip()
+    for season in os.getenv("VTB_YOUTH_SEASONS", "2026,2027").split(",")
+    if season.strip()
+)
+WINLINE_BASKET_CUP_SEASONS = tuple(
+    season.strip()
+    for season in os.getenv("WINLINE_BASKET_CUP_SEASONS", "2026,2027").split(",")
+    if season.strip()
+)
+VTB_SUPERCUP_SEASONS = tuple(
+    season.strip()
+    for season in os.getenv(
+        "VTB_SUPERCUP_SEASONS",
+        f"{VTB_SUPERCUP_SEASON},2027",
+    ).split(",")
+    if season.strip()
+)
 
 COMPETITIONS: list[Competition] = [
     Competition(
@@ -112,8 +130,10 @@ COMPETITIONS: list[Competition] = [
         ics_filename="vtb-youth-league.ics",
         color_hex="#1D70B8",
         logo_filename="vtb-youth.png",
-        source_type=SOURCE_INFOBASKET_COMP,
-        comp_id="50719",
+        source_type=SOURCE_RUSSIABASKET_TAG_SEASONS,
+        tag="vtbyouth",
+        seasons=VTB_YOUTH_SEASONS,
+        calendar_type=-1,
     ),
     Competition(
         slug="winline-basket-cup",
@@ -123,8 +143,10 @@ COMPETITIONS: list[Competition] = [
         ics_filename="winline-basket-cup.ics",
         color_hex="#ff6a13",
         logo_filename="winline-basket-cup.png",
-        source_type=SOURCE_INFOBASKET_COMP,
-        comp_id="52553",
+        source_type=SOURCE_RUSSIABASKET_TAG_SEASONS,
+        tag="wbc",
+        seasons=WINLINE_BASKET_CUP_SEASONS,
+        calendar_type=-1,
     ),
     Competition(
         slug="vtb-supercup",
@@ -134,9 +156,10 @@ COMPETITIONS: list[Competition] = [
         ics_filename="vtb-supercup.ics",
         color_hex="#282F6C",
         logo_filename="vtb-supercup.png",
-        source_type=SOURCE_RUSSIABASKET_TAG_SEASON,
+        source_type=SOURCE_RUSSIABASKET_TAG_SEASONS,
         tag="vtb-supercup",
-        season=VTB_SUPERCUP_SEASON,
+        seasons=VTB_SUPERCUP_SEASONS,
+        calendar_type=-1,
         team_mode=True,
     ),
 ]
@@ -165,10 +188,9 @@ TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 
-# Slugs already published for the 2025/26 VTB teams. For the multi-season VTB
-# calendar the stable teamId is the primary identity, so a rename in a later
-# season (for example, МБА-МАИ -> МБА) does not create a second team page or
-# change an existing subscription URL.
+# Slugs already published for the 2025/26 teams. In multi-season calendars the
+# stable teamId is the primary identity, so a rename in a later season does not
+# create a second team page or change an existing subscription URL.
 TEAM_ID_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
     "vtb": {
         "15": "cska",
@@ -182,7 +204,43 @@ TEAM_ID_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
         "2792": "samara",
         "2994": "zenit",
         "3059": "parma",
-    }
+    },
+    "vtb-youth": {
+        "220": "avtodor-2",
+        "224": "csp-khimki-2",
+        "679": "cska-junior",
+        "731": "enisey-2",
+        "1013": "unics-2",
+        "1386": "parma-m",
+        "2623": "sshor-lokomotiv-kuban",
+        "2821": "nizhny-novgorod-meshchersky",
+        "2889": "mba-mai-junior",
+        "2991": "samara-2",
+        "2992": "zenit-m",
+        "25804": "minsk-m",
+        "31538": "uralmash-2",
+        "53406": "astana-zhastar",
+    },
+    "winline-basket-cup": {
+        "15": "cska",
+        "697": "unics",
+        "1390": "uralmash",
+        "2650": "lokomotiv-kuban",
+        "2994": "zenit",
+        "3059": "parma",
+        "29934": "mega-superbet",
+        "54849": "igokea-mtel",
+    },
+    "vtb-supercup": {
+        "15": "cska",
+        "520": "crvena-zvezda",
+        "563": "anadolu-efes",
+        "697": "unics",
+        "2650": "lokomotiv-kuban",
+        "2994": "zenit",
+        "52852": "dubay",
+        "54849": "igokea",
+    },
 }
 
 TEAM_EXCLUDE_FROM_TEAM_PAGES: dict[str, set[str]] = {
@@ -195,7 +253,15 @@ TEAM_EXCLUDE_FROM_TEAM_PAGES: dict[str, set[str]] = {
         "Победитель 1/2 финала (2)",
         "Проигравший в 1/2 финала (1)",
         "Проигравший в 1/2 финала (2)",
-    }
+    },
+    "vtb-supercup": {
+        "1-A",
+        "1-B",
+        "2-A",
+        "2-B",
+        "3-A",
+        "3-B",
+    },
 }
 
 TRANSLIT_MAP = {
@@ -311,7 +377,7 @@ def get_excluded_team_names(comp: Competition) -> set[str]:
 
 
 def team_identity(comp: Competition, name: str, team_id: str | None) -> str:
-    if comp.slug == "vtb" and team_id:
+    if comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASONS and team_id:
         return f"teamId:{team_id}"
     return name
 
