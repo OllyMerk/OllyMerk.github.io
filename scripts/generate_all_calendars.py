@@ -40,9 +40,12 @@ UTC = timezone.utc
 MSK = timezone(timedelta(hours=3), name="MSK")
 REQUEST_TIMEOUT = 30
 USER_AGENT = "Basketball-Calendars-Bot/4.0"
+RUSSIABASKET_LANG = os.getenv("RUSSIABASKET_LANG", "ru")
+RUSSIABASKET_PAGE_SIZE = int(os.getenv("RUSSIABASKET_PAGE_SIZE", "100"))
 
 SOURCE_INFOBASKET_COMP = "infobasket_comp"
 SOURCE_RUSSIABASKET_TAG_SEASON = "russiabasket_tag_season"
+SOURCE_RUSSIABASKET_TAG_SEASONS = "russiabasket_tag_seasons"
 
 
 @dataclass(slots=True)
@@ -58,6 +61,7 @@ class Competition:
     comp_id: str | None = None
     tag: str | None = None
     season: str | None = None
+    seasons: tuple[str, ...] = ()
     calendar_type: int | None = None
     team_mode: bool = True
 
@@ -74,10 +78,17 @@ class Event:
     url: str | None
     team_a: str | None
     team_b: str | None
+    team_a_id: str | None = None
+    team_b_id: str | None = None
 
 
 RUSSIABASKET_DEFAULT_SEASON = os.getenv("RUSSIABASKET_DEFAULT_SEASON", "2026")
 VTB_SUPERCUP_SEASON = os.getenv("VTB_SUPERCUP_SEASON", RUSSIABASKET_DEFAULT_SEASON)
+VTB_SEASONS = tuple(
+    season.strip()
+    for season in os.getenv("VTB_SEASONS", "2026,2027").split(",")
+    if season.strip()
+)
 
 COMPETITIONS: list[Competition] = [
     Competition(
@@ -88,8 +99,10 @@ COMPETITIONS: list[Competition] = [
         ics_filename="vtb-united-league.ics",
         color_hex="#010070",
         logo_filename="vtb.png",
-        source_type=SOURCE_INFOBASKET_COMP,
-        comp_id="50714",
+        source_type=SOURCE_RUSSIABASKET_TAG_SEASONS,
+        tag="vtb",
+        seasons=VTB_SEASONS,
+        calendar_type=-1,
     ),
     Competition(
         slug="vtb-youth",
@@ -150,6 +163,26 @@ TEAM_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
         "УНИКС": "unics",
         "ЦСКА": "cska",
     },
+}
+
+# Slugs already published for the 2025/26 VTB teams. For the multi-season VTB
+# calendar the stable teamId is the primary identity, so a rename in a later
+# season (for example, МБА-МАИ -> МБА) does not create a second team page or
+# change an existing subscription URL.
+TEAM_ID_SLUG_OVERRIDES: dict[str, dict[str, str]] = {
+    "vtb": {
+        "15": "cska",
+        "468": "pari-nizhny-novgorod",
+        "682": "avtodor",
+        "688": "enisey",
+        "697": "unics",
+        "1390": "uralmash",
+        "2650": "lokomotiv-kuban",
+        "2747": "mba-mai",
+        "2792": "samara",
+        "2994": "zenit",
+        "3059": "parma",
+    }
 }
 
 TEAM_EXCLUDE_FROM_TEAM_PAGES: dict[str, set[str]] = {
@@ -277,6 +310,36 @@ def get_excluded_team_names(comp: Competition) -> set[str]:
     return TEAM_EXCLUDE_FROM_TEAM_PAGES.get(comp.slug, set())
 
 
+def team_identity(comp: Competition, name: str, team_id: str | None) -> str:
+    if comp.slug == "vtb" and team_id:
+        return f"teamId:{team_id}"
+    return name
+
+
+def event_team_sides(comp: Competition, event: Event) -> list[tuple[str, str, str | None, str]]:
+    excluded_names = get_excluded_team_names(comp)
+    sides: list[tuple[str, str, str | None, str]] = []
+    if event.team_a and event.team_a not in excluded_names:
+        sides.append(
+            (
+                team_identity(comp, event.team_a, event.team_a_id),
+                event.team_a,
+                event.team_a_id,
+                "home",
+            )
+        )
+    if event.team_b and event.team_b not in excluded_names:
+        sides.append(
+            (
+                team_identity(comp, event.team_b, event.team_b_id),
+                event.team_b,
+                event.team_b_id,
+                "away",
+            )
+        )
+    return sides
+
+
 def build_infobasket_calendar_params(comp: Competition) -> dict[str, Any]:
     if not comp.comp_id:
         raise ValueError(f"comp_id is required for {comp.slug}")
@@ -291,6 +354,31 @@ def build_russiabasket_calendar_params(comp: Competition) -> dict[str, Any]:
     if not comp.tag or not comp.season:
         raise ValueError(f"tag and season are required for {comp.slug}")
     params: dict[str, Any] = {"tag": comp.tag, "season": comp.season}
+    if comp.calendar_type is not None:
+        params["calendarType"] = comp.calendar_type
+    return params
+
+
+def build_russiabasket_paginated_calendar_params(
+    comp: Competition,
+    season: str,
+    skip_count: int,
+    max_result_count: int,
+) -> dict[str, Any]:
+    if not comp.tag:
+        raise ValueError(f"tag is required for {comp.slug}")
+    if skip_count < 0:
+        raise ValueError("skip_count must not be negative")
+    if max_result_count <= 0:
+        raise ValueError("max_result_count must be positive")
+
+    params: dict[str, Any] = {
+        "tag": comp.tag,
+        "season": season,
+        "lang": RUSSIABASKET_LANG,
+        "skipCount": skip_count,
+        "maxResultCount": max_result_count,
+    }
     if comp.calendar_type is not None:
         params["calendarType"] = comp.calendar_type
     return params
@@ -355,6 +443,41 @@ def dedupe_rows(rows: list[dict[str, Any]], key_fields: list[str] | None = None)
     return unique
 
 
+def russiabasket_game_id(item: dict[str, Any]) -> str | None:
+    game = item.get("game") if isinstance(item.get("game"), dict) else {}
+    return norm(game.get("id"))
+
+
+def dedupe_russiabasket_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for row in rows:
+        game_id = russiabasket_game_id(row)
+        signature = f"game.id:{game_id}" if game_id else json.dumps(
+            row,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(row)
+    return unique
+
+
+def format_russiabasket_season(value: Any) -> str | None:
+    season = norm(value)
+    if not season:
+        return None
+    try:
+        end_year = int(season)
+    except ValueError:
+        return season
+    return f"{end_year - 1}/{end_year % 100:02d}"
+
+
 def build_infobasket_event(row: dict[str, Any], comp: Competition) -> Event | None:
     game_id = norm(row.get("GameID"))
     if not game_id:
@@ -362,6 +485,8 @@ def build_infobasket_event(row: dict[str, Any], comp: Competition) -> Event | No
 
     team_a = norm(row.get("CompTeamNameAru")) or norm(row.get("ShortTeamNameAru")) or "Команда А"
     team_b = norm(row.get("CompTeamNameBru")) or norm(row.get("ShortTeamNameBru")) or "Команда Б"
+    team_a_id = norm(row.get("TeamAid"))
+    team_b_id = norm(row.get("TeamBid"))
     summary = f"{team_a} — {team_b}"
 
     dt_utc = parse_ms_ajax_date(norm(row.get("GameDateTimeMoscow")))
@@ -445,6 +570,8 @@ def build_infobasket_event(row: dict[str, Any], comp: Competition) -> Event | No
         url=None,
         team_a=team_a,
         team_b=team_b,
+        team_a_id=team_a_id,
+        team_b_id=team_b_id,
     )
 
 
@@ -464,31 +591,39 @@ def build_russiabasket_event(item: dict[str, Any], comp: Competition) -> Event |
 
     team_a = norm(team1.get("name")) or norm(team1.get("shortName")) or "Команда А"
     team_b = norm(team2.get("name")) or norm(team2.get("shortName")) or "Команда Б"
+    team_a_id = norm(team1.get("teamId"))
+    team_b_id = norm(team2.get("teamId"))
     summary = f"{team_a} — {team_b}"
 
-    dt_local = (
-        parse_iso_datetime(norm(game.get("scheduledTime")))
-        or parse_iso_datetime(norm(game.get("defaultZoneDateTime")))
-        or parse_iso_datetime(norm(game.get("startTime")))
-    )
     has_time = bool(game.get("hasTime", True))
     local_date = parse_date_ddmmyyyy(norm(game.get("localDate")))
+    dt_local: datetime | None = None
 
-    all_day = False
-    if dt_local is None:
+    if not has_time:
+        # A midnight placeholder carries an arena offset and can point to the
+        # previous day elsewhere. Until tip-off time is published, localDate
+        # is the authoritative calendar date.
         if local_date is None:
             return None
         all_day = True
         start_value: datetime | date = local_date
         end_value: datetime | date = local_date + timedelta(days=1)
     else:
-        if has_time:
+        dt_local = (
+            parse_iso_datetime(norm(game.get("scheduledTime")))
+            or parse_iso_datetime(norm(game.get("defaultZoneDateTime")))
+            or parse_iso_datetime(norm(game.get("startTime")))
+        )
+        if dt_local is not None:
+            all_day = False
             start_value = dt_local.astimezone(UTC)
             end_value = start_value + timedelta(hours=2)
         else:
+            if local_date is None:
+                return None
             all_day = True
-            start_value = local_date or dt_local.date()
-            end_value = start_value + timedelta(days=1)
+            start_value = local_date
+            end_value = local_date + timedelta(days=1)
 
     arena_name = norm(arena.get("name")) or norm(arena.get("shortName"))
     region_name = norm(region.get("name"))
@@ -496,6 +631,7 @@ def build_russiabasket_event(item: dict[str, Any], comp: Competition) -> Event |
 
     description_lines: list[str] = []
     league_name = norm(league.get("name"))
+    season_name = format_russiabasket_season(league.get("season"))
     comp_name = norm(comp_info.get("name"))
     game_number = norm(game.get("number"))
     status_name = norm(status.get("displayName"))
@@ -508,6 +644,8 @@ def build_russiabasket_event(item: dict[str, Any], comp: Competition) -> Event |
 
     if league_name:
         description_lines.append(f"Лига: {league_name}")
+    if season_name:
+        description_lines.append(f"Сезон: {season_name}")
     if comp_name:
         description_lines.append(f"Этап: {comp_name}")
     if game_number:
@@ -543,7 +681,96 @@ def build_russiabasket_event(item: dict[str, Any], comp: Competition) -> Event |
         url=None,
         team_a=team_a,
         team_b=team_b,
+        team_a_id=team_a_id,
+        team_b_id=team_b_id,
     )
+
+
+def fetch_russiabasket_season_rows(
+    comp: Competition,
+    season: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    pages: list[dict[str, Any]] = []
+    seen_page_signatures: set[str] = set()
+    skip_count = 0
+    total_count: int | None = None
+
+    while True:
+        params = build_russiabasket_paginated_calendar_params(
+            comp,
+            season,
+            skip_count,
+            RUSSIABASKET_PAGE_SIZE,
+        )
+        payload = request_json(RUSSIABASKET_CALENDAR_URL, params)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Expected dict from RussiaBasket calendar for {comp.slug} season {season}, "
+                f"got {type(payload).__name__}"
+            )
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise RuntimeError(
+                f"No items list in RussiaBasket response for {comp.slug} season {season}"
+            )
+        page_rows = [row for row in items if isinstance(row, dict)]
+
+        total_count_raw = payload.get("totalCount")
+        try:
+            total_count = int(total_count_raw) if total_count_raw is not None else None
+        except (TypeError, ValueError):
+            total_count = None
+
+        page_signature = json.dumps(
+            [
+                russiabasket_game_id(row)
+                or json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+                for row in page_rows
+            ],
+            ensure_ascii=False,
+        )
+        if page_rows and page_signature in seen_page_signatures:
+            raise RuntimeError(
+                f"RussiaBasket repeated a page for {comp.slug} season {season} "
+                f"at skipCount={skip_count}"
+            )
+        seen_page_signatures.add(page_signature)
+
+        unique_before = len(dedupe_russiabasket_rows(rows))
+        rows.extend(page_rows)
+        unique_after = len(dedupe_russiabasket_rows(rows))
+        pages.append(
+            {
+                "skipCount": skip_count,
+                "maxResultCount": RUSSIABASKET_PAGE_SIZE,
+                "items_count": len(items),
+                "dict_items_count": len(page_rows),
+                "unique_games_added": unique_after - unique_before,
+                "status": payload.get("status"),
+                "totalCount": total_count_raw,
+            }
+        )
+
+        if not items:
+            break
+        skip_count += len(items)
+        if total_count is not None and skip_count >= total_count:
+            break
+        if total_count is None and len(items) < RUSSIABASKET_PAGE_SIZE:
+            break
+
+    unique_rows = dedupe_russiabasket_rows(rows)
+    season_debug = {
+        "season": season,
+        "pages_count": len(pages),
+        "pages": pages,
+        "reported_total_count": total_count,
+        "fetched_rows_count": len(rows),
+        "unique_game_ids_count": len(unique_rows),
+    }
+    return unique_rows, season_debug
 
 
 def fetch_source_rows(comp: Competition, debug: dict[str, Any]) -> list[dict[str, Any]]:
@@ -568,6 +795,24 @@ def fetch_source_rows(comp: Competition, debug: dict[str, Any]) -> list[dict[str
         debug["periods_count"] = len(periods)
         return rows
 
+    if comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASONS:
+        if not comp.seasons:
+            raise ValueError(f"seasons are required for {comp.slug}")
+
+        rows: list[dict[str, Any]] = []
+        seasons_debug: list[dict[str, Any]] = []
+        for season in comp.seasons:
+            season_rows, season_debug = fetch_russiabasket_season_rows(comp, season)
+            rows.extend(season_rows)
+            seasons_debug.append(season_debug)
+
+        rows = dedupe_russiabasket_rows(rows)
+        debug["source_endpoint"] = RUSSIABASKET_CALENDAR_URL
+        debug["source_seasons"] = seasons_debug
+        debug["source_rows_count"] = len(rows)
+        debug["source_first_keys"] = list(rows[0].keys()) if rows else []
+        return rows
+
     if comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASON:
         params = build_russiabasket_calendar_params(comp)
         payload = request_json(RUSSIABASKET_CALENDAR_URL, params)
@@ -579,7 +824,7 @@ def fetch_source_rows(comp: Competition, debug: dict[str, Any]) -> list[dict[str
         if not isinstance(items, list):
             raise RuntimeError(f"No items list in RussiaBasket response for {comp.slug}")
         rows = [row for row in items if isinstance(row, dict)]
-        rows = dedupe_rows(rows, key_fields=["id"])
+        rows = dedupe_russiabasket_rows(rows)
         debug["source_endpoint"] = RUSSIABASKET_CALENDAR_URL
         debug["source_params"] = params
         debug["source_status"] = payload.get("status")
@@ -598,7 +843,10 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
     for idx, row in enumerate(rows):
         if comp.source_type == SOURCE_INFOBASKET_COMP:
             event = build_infobasket_event(row, comp)
-        elif comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASON:
+        elif comp.source_type in {
+            SOURCE_RUSSIABASKET_TAG_SEASON,
+            SOURCE_RUSSIABASKET_TAG_SEASONS,
+        }:
             event = build_russiabasket_event(row, comp)
         else:
             raise ValueError(f"Unsupported source_type: {comp.source_type}")
@@ -818,6 +1066,12 @@ def render_comp_index(comp: Competition, events: list[Event], team_stats: list[d
     source_note = ""
     if comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASON and comp.tag and comp.season:
         source_note = f"<p class='muted'>Источник: tag={html.escape(comp.tag)}, season={html.escape(comp.season)}</p>"
+    elif comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASONS and comp.tag and comp.seasons:
+        seasons_text = ", ".join(comp.seasons)
+        source_note = (
+            f"<p class='muted'>Источник: tag={html.escape(comp.tag)}, "
+            f"seasons={html.escape(seasons_text)}</p>"
+        )
 
     rows = []
     for event in upcoming[:30]:
@@ -1017,6 +1271,8 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
         extra = ""
         if comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASON and comp.season:
             extra = f"<p>Сезон: {html.escape(comp.season)}</p>"
+        elif comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASONS and comp.seasons:
+            extra = f"<p>Сезоны: {html.escape(', '.join(comp.seasons))}</p>"
         cards.append(
             f"""
             <div class="comp-card" style="background: linear-gradient(135deg, {html.escape(comp.color_hex)} 0%, rgba(0,0,0,0.78) 100%);">
@@ -1084,7 +1340,12 @@ def generate_team_pages(comp: Competition, events: list[Event], team_stats: list
     for team_info in team_stats:
         team_name = team_info["name"]
         team_slug = team_info["slug"]
-        team_events = [event for event in events if event.team_a == team_name or event.team_b == team_name]
+        team_key = team_info["team_key"]
+        team_events = [
+            event
+            for event in events
+            if any(side_key == team_key for side_key, _, _, _ in event_team_sides(comp, event))
+        ]
         team_dir = teams_dir / team_slug
         team_dir.mkdir(parents=True, exist_ok=True)
         write_ics(team_events, team_dir / f"{team_slug}.ics", f"{team_name} — {comp.title}")
@@ -1094,6 +1355,8 @@ def generate_team_pages(comp: Competition, events: list[Event], team_stats: list
             "competition_slug": comp.slug,
             "competition_title": comp.title,
             "team_name": team_name,
+            "team_id": team_info.get("team_id"),
+            "team_names": team_info.get("names", [team_name]),
             "team_slug": team_slug,
             "team_page_url": team_info["page_url"],
             "team_ics_url": team_info["ics_url"],
@@ -1109,6 +1372,8 @@ def generate_team_pages(comp: Competition, events: list[Event], team_stats: list
                     "description": event.description,
                     "team_a": event.team_a,
                     "team_b": event.team_b,
+                    "team_a_id": event.team_a_id,
+                    "team_b_id": event.team_b_id,
                 }
                 for event in team_events[:10]
             ],
@@ -1117,37 +1382,54 @@ def generate_team_pages(comp: Competition, events: list[Event], team_stats: list
 
 
 def build_team_slug_map(comp: Competition, events: list[Event]) -> dict[str, str]:
-    excluded_names = get_excluded_team_names(comp)
-    team_names = sorted({
-        team_name
-        for event in events
-        for team_name in [event.team_a, event.team_b]
-        if team_name and team_name not in excluded_names
-    })
-    overrides = TEAM_SLUG_OVERRIDES.get(comp.slug, {})
+    profiles: dict[str, dict[str, Any]] = {}
+    for event in events:
+        for team_key, team_name, team_id, _ in event_team_sides(comp, event):
+            profile = profiles.setdefault(
+                team_key,
+                {"name": team_name, "team_id": team_id, "names": set()},
+            )
+            profile["name"] = team_name
+            profile["team_id"] = team_id or profile["team_id"]
+            profile["names"].add(team_name)
+
+    name_overrides = TEAM_SLUG_OVERRIDES.get(comp.slug, {})
+    id_overrides = TEAM_ID_SLUG_OVERRIDES.get(comp.slug, {})
     slug_map: dict[str, str] = {}
     used_slugs: set[str] = set()
-    for team_name in team_names:
-        base_slug = overrides.get(team_name) or slugify_team_name(team_name)
+    for team_key, profile in sorted(profiles.items(), key=lambda item: item[1]["name"]):
+        team_name = profile["name"]
+        team_id = profile["team_id"]
+        name_override = next(
+            (
+                name_overrides[name]
+                for name in [team_name, *sorted(profile["names"])]
+                if name in name_overrides
+            ),
+            None,
+        )
+        base_slug = id_overrides.get(team_id or "") or name_override or slugify_team_name(team_name)
         slug = base_slug
         idx = 2
         while slug in used_slugs:
             slug = f"{base_slug}-{idx}"
             idx += 1
-        slug_map[team_name] = slug
+        slug_map[team_key] = slug
         used_slugs.add(slug)
     return slug_map
 
 
 def collect_team_stats(comp: Competition, events: list[Event], slug_map: dict[str, str]) -> list[dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
-    excluded_names = get_excluded_team_names(comp)
 
-    def ensure_team(name: str) -> dict[str, Any]:
-        if name not in stats:
-            team_slug = slug_map[name]
-            stats[name] = {
+    def ensure_team(team_key: str, name: str, team_id: str | None) -> dict[str, Any]:
+        if team_key not in stats:
+            team_slug = slug_map[team_key]
+            stats[team_key] = {
+                "team_key": team_key,
+                "team_id": team_id,
                 "name": name,
+                "names": [],
                 "slug": team_slug,
                 "page_url": team_page_url(comp, team_slug),
                 "ics_url": team_ics_url(comp, team_slug),
@@ -1159,18 +1441,18 @@ def collect_team_stats(comp: Competition, events: list[Event], slug_map: dict[st
                 "next_game_start_utc": None,
                 "sample_matchups": [],
             }
-        return stats[name]
+        item = stats[team_key]
+        item["name"] = name
+        item["team_id"] = team_id or item["team_id"]
+        if name not in item["names"]:
+            item["names"].append(name)
+        return item
 
     now_utc = datetime.now(tz=UTC)
     for event in events:
         start_dt_utc = event.start.astimezone(UTC) if isinstance(event.start, datetime) else None
-        teams_for_event = []
-        if event.team_a and event.team_a not in excluded_names:
-            teams_for_event.append((event.team_a, "home"))
-        if event.team_b and event.team_b not in excluded_names:
-            teams_for_event.append((event.team_b, "away"))
-        for team_name, side in teams_for_event:
-            item = ensure_team(team_name)
+        for team_key, team_name, team_id, side in event_team_sides(comp, event):
+            item = ensure_team(team_key, team_name, team_id)
             item["games_count"] += 1
             item["home_games_count"] += side == "home"
             item["away_games_count"] += side == "away"
@@ -1203,6 +1485,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "title": comp.title,
         "tag": comp.tag,
         "season": comp.season,
+        "seasons": list(comp.seasons),
         "comp_id": comp.comp_id,
         "calendar_type": comp.calendar_type,
         "excluded_team_names": excluded_names,
@@ -1234,6 +1517,8 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
                 "description": event.description,
                 "team_a": event.team_a,
                 "team_b": event.team_b,
+                "team_a_id": event.team_a_id,
+                "team_b_id": event.team_b_id,
             } for event in events[:10]
         ],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1243,6 +1528,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         "comp_id": comp.comp_id,
         "tag": comp.tag,
         "season": comp.season,
+        "seasons": list(comp.seasons),
         "slug": comp.slug,
         "title": comp.title,
         "excluded_team_names": excluded_names,
@@ -1276,6 +1562,7 @@ def main() -> None:
                 "source_type": result["comp"].source_type,
                 "tag": result["comp"].tag,
                 "season": result["comp"].season,
+                "seasons": list(result["comp"].seasons),
                 "comp_id": result["comp"].comp_id,
                 "site_url": comp_site_url(result["comp"]),
                 "ics_url": comp_ics_url(result["comp"]),
