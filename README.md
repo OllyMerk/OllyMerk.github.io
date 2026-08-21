@@ -1,15 +1,17 @@
 # Basketball calendars for Apple / Google
 
-Готовый проект для GitHub Pages + GitHub Actions, который автоматически публикует сайты и подписные `.ics`-календари для трёх соревнований:
+Готовый проект для GitHub Pages + GitHub Actions, который автоматически публикует сайты и подписные `.ics`-календари для четырёх соревнований:
 
 - Единая Лига ВТБ
 - Единая Молодежная Лига ВТБ
 - WINLINE Basket Cup
+- Суперкубок Единой Лиги ВТБ
 
 ## Что делает проект
 
-- раз в сутки запускает Python-скрипт в GitHub Actions;
-- берёт календари соревнований из `org.infobasket.su`;
+- раз в час запускает Python-скрипт в GitHub Actions;
+- загружает несколько сезонов из официального API РФБ с пагинацией;
+- объединяет командные календари между сезонами по `teamId`;
 - генерирует отдельные `.ics`-файлы;
 - публикует отдельные страницы для каждого календаря;
 - публикует главную страницу-хаб со ссылками на все соревнования;
@@ -34,24 +36,25 @@
 - страница: `https://ollymerk.github.io/winline-basket-cup/`
 - календарь: `https://ollymerk.github.io/winline-basket-cup/winline-basket-cup.ics`
 
+### Суперкубок Единой Лиги ВТБ
+- страница: `https://ollymerk.github.io/vtb-supercup/`
+- календарь: `https://ollymerk.github.io/vtb-supercup/vtb-supercup.ics`
+
 ## Источники данных
 
-### Единая Лига ВТБ
-- `https://org.infobasket.su/Comp/GetCalendar/?comps=50714&format=json`
-- `https://org.infobasket.su/Comp/GetCalendarPeriods/50714?lang=ru&period=m`
+Все четыре календаря используют:
 
-### Единая Молодежная Лига ВТБ
-- `https://org.infobasket.su/Comp/GetCalendar/?comps=50719&format=json`
-- `https://org.infobasket.su/Comp/GetCalendarPeriods/50719?lang=ru&period=m`
+- endpoint: `https://pro.russiabasket.org/api/abc/comps/calendar`;
+- сезоны: `2026,2027`;
+- параметры: `calendarType=-1`, `lang=ru`, `skipCount`, `maxResultCount`;
+- теги: `vtb`, `vtbyouth`, `wbc`, `vtb-supercup`.
 
-### WINLINE Basket Cup
-- `https://org.infobasket.su/Comp/GetCalendar/?comps=52553&format=json`
-- `https://org.infobasket.su/Comp/GetCalendarPeriods/52553?lang=ru&period=m`
+События дедуплицируются по `game.id`. Для матчей без опубликованного времени создаются all-day события строго по `localDate`.
 
 ## Что внутри репозитория
 
-- `scripts/generate_all_calendars.py` — генератор всех трёх календарей и HTML-страниц
-- `.github/workflows/update-calendars.yml` — ежедневный запуск и публикация через GitHub Pages
+- `scripts/generate_all_calendars.py` — генератор всех четырёх календарей и HTML-страниц
+- `.github/workflows/update-calendars.yml` — ежечасный запуск и публикация через GitHub Pages
 - `requirements.txt` — Python-зависимости
 - `site/` — итоговая собранная статика, которая публикуется на GitHub Pages
 
@@ -77,3 +80,9 @@ site/
     index.html
     debug.json
     winline-basket-cup.ics
+
+  vtb-supercup/
+    index.html
+    debug.json
+    vtb-supercup.ics
+```
