@@ -80,6 +80,7 @@ class Event:
     team_b: str | None
     team_a_id: str | None = None
     team_b_id: str | None = None
+    season: str | None = None
 
 
 RUSSIABASKET_DEFAULT_SEASON = os.getenv("RUSSIABASKET_DEFAULT_SEASON", "2026")
@@ -139,7 +140,7 @@ COMPETITIONS: list[Competition] = [
         slug="winline-basket-cup",
         title="WINLINE Basket Cup",
         short_title="WCB",
-        description="Подписной календарь матчей WINLINE Basket Cup с ежедневным обновлением.",
+        description="Календарь матчей WINLINE Basket Cup с автообновлением для Apple Calendar и Google Calendar.",
         ics_filename="winline-basket-cup.ics",
         color_hex="#ff6a13",
         logo_filename="winline-basket-cup.png",
@@ -152,7 +153,7 @@ COMPETITIONS: list[Competition] = [
         slug="vtb-supercup",
         title="Суперкубок Единой Лиги ВТБ",
         short_title="Supercup",
-        description="Подписной календарь матчей Суперкубка Единой Лиги ВТБ по официальному API РФБ.",
+        description="Календарь матчей Суперкубка Единой Лиги ВТБ с автообновлением для Apple Calendar и Google Calendar.",
         ics_filename="vtb-supercup.ics",
         color_hex="#282F6C",
         logo_filename="vtb-supercup.png",
@@ -920,6 +921,13 @@ def build_events(rows: list[dict[str, Any]], comp: Competition, debug: dict[str,
         if event is None:
             skipped.append({"index": idx, "preview": json.dumps(row, ensure_ascii=False, default=str)[:400]})
             continue
+        if comp.source_type in {
+            SOURCE_RUSSIABASKET_TAG_SEASON,
+            SOURCE_RUSSIABASKET_TAG_SEASONS,
+        }:
+            league = row.get("league") if isinstance(row.get("league"), dict) else {}
+            comp_info = row.get("comp") if isinstance(row.get("comp"), dict) else {}
+            event.season = norm(league.get("season")) or norm(comp_info.get("season")) or comp.season
         events.append(event)
 
     def sort_key(event: Event) -> tuple[datetime, str]:
@@ -989,6 +997,17 @@ def event_is_upcoming(event: Event, now_utc: datetime) -> bool:
         return end_dt >= now_utc
     assert isinstance(event.end, datetime)
     return event.end >= now_utc
+
+
+def count_events_by_season(comp: Competition, events: list[Event]) -> dict[str, int]:
+    configured_seasons = list(comp.seasons)
+    if not configured_seasons and comp.season:
+        configured_seasons = [comp.season]
+    counts = {season: 0 for season in configured_seasons}
+    for event in events:
+        if event.season:
+            counts[event.season] = counts.get(event.season, 0) + 1
+    return counts
 
 
 def format_event_start_for_site(event: Event) -> str:
@@ -1125,6 +1144,9 @@ def render_team_search_script() -> str:
 def render_comp_index(comp: Competition, events: list[Event], team_stats: list[dict[str, Any]], debug: dict[str, Any]) -> str:
     updated = datetime.now().astimezone().strftime("%d.%m.%Y %H:%М")
     upcoming = [event for event in events if event_is_upcoming(event, datetime.now(tz=UTC))]
+    season_counts = count_events_by_season(comp, events)
+    season_counts_text = ", ".join(f"{season}: {count}" for season, count in season_counts.items())
+    season_counts_note = f" Матчей по сезонам: {season_counts_text}." if season_counts_text else ""
     ics_url = comp_ics_url(comp)
     color_hex = comp.color_hex
     workflow_url = github_workflow_url()
@@ -1175,7 +1197,7 @@ def render_comp_index(comp: Competition, events: list[Event], team_stats: list[d
         <div class="title-block">
           <h1>{html.escape(comp.title)}</h1>
           <p>{html.escape(comp.description)}</p>
-          <p class="muted">Обновлено: {html.escape(updated)}. Событий: {len(events)}. Команд: {len(team_stats)}.</p>
+          <p class="muted">Обновлено: {html.escape(updated)}. Всего матчей: {len(events)}.{html.escape(season_counts_note)} Команд: {len(team_stats)}.</p>
           {source_note}
         </div>
       </div>
@@ -1339,6 +1361,10 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
             extra = f"<p>Сезон: {html.escape(comp.season)}</p>"
         elif comp.source_type == SOURCE_RUSSIABASKET_TAG_SEASONS and comp.seasons:
             extra = f"<p>Сезоны: {html.escape(', '.join(comp.seasons))}</p>"
+        season_counts_html = "".join(
+            f'<span class="pill">Матчей в сезоне {html.escape(season)}: {count}</span>'
+            for season, count in result["season_counts"].items()
+        )
         cards.append(
             f"""
             <div class="comp-card" style="background: linear-gradient(135deg, {html.escape(comp.color_hex)} 0%, rgba(0,0,0,0.78) 100%);">
@@ -1352,7 +1378,8 @@ def render_root_index(results: list[dict[str, Any]]) -> str:
                 </div>
               </div>
               <div style="position:relative;z-index:1;">
-                <span class="pill">Событий: {result['events_count']}</span>
+                {season_counts_html}
+                <span class="pill">Всего матчей: {result['events_count']}</span>
                 <span class="pill">Ближайших / будущих: {result['upcoming_count']}</span>
               </div>
               <div class="comp-card-actions">
@@ -1558,6 +1585,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     }
     rows = fetch_source_rows(comp, debug)
     events = build_events(rows, comp, debug)
+    season_counts = count_events_by_season(comp, events)
     slug_map = build_team_slug_map(comp, events)
     team_stats = collect_team_stats(comp, events, slug_map)
 
@@ -1571,6 +1599,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
         **debug,
         "rows_count": len(rows),
         "events_count": len(events),
+        "season_counts": season_counts,
         "teams_detected_count": len(team_stats),
         "first_events": [
             {
@@ -1585,6 +1614,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
                 "team_b": event.team_b,
                 "team_a_id": event.team_a_id,
                 "team_b_id": event.team_b_id,
+                "season": event.season,
             } for event in events[:10]
         ],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1605,6 +1635,7 @@ def generate_for_comp(comp: Competition) -> dict[str, Any]:
     return {
         "comp": comp,
         "events_count": len(events),
+        "season_counts": season_counts,
         "upcoming_count": sum(1 for event in events if event_is_upcoming(event, datetime.now(tz=UTC))),
         "teams_detected_count": len(team_stats),
         "page_exists": (comp_dir / "index.html").exists(),
@@ -1634,6 +1665,7 @@ def main() -> None:
                 "ics_url": comp_ics_url(result["comp"]),
                 "teams_url": comp_teams_url(result["comp"]),
                 "events_count": result["events_count"],
+                "season_counts": result["season_counts"],
                 "upcoming_count": result["upcoming_count"],
                 "teams_detected_count": result["teams_detected_count"],
                 "page_exists": result["page_exists"],
